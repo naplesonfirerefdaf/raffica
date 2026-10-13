@@ -19,6 +19,7 @@ export const DEFAULT_SETTINGS = {
   crazy: true,     // global crazy rules ("regole pazze")
   variants: true,  // per-game crazy variants
   loserPicks: true,
+  teams: false,    // 2 contro 2 (needs 4 players, 2 per team): a game won by a player gives the point to the whole team
   only: null,      // array of game ids to restrict the pool (practice / free play)
 };
 

@@ -75,6 +75,120 @@ function addStun(s, p, amt, g) {
 
 const active = (p) => !p.out && !(p.fall > 0);
 
+// ---- Computer player ----
+const BOT_DELAY = [0.34, 0.2, 0.09]; // reaction delay of the bot driver per level (core/bots.js)
+
+// Nearest rope to (x, y): outward normal and distance from the rope line (ring half-size R, body radius r).
+function nearestRope(x, y, R, r) {
+  const lim = R - r * 0.25;
+  const opts = [[1, 0, lim - (x - CX)], [-1, 0, lim + (x - CX)], [0, 1, lim - (y - CY)], [0, -1, lim + (y - CY)]];
+  let b = opts[0];
+  for (const o of opts) if (o[2] < b[2]) b = o;
+  return { nx: b[0], ny: b[1], d: Math.max(0, b[2]) };
+}
+
+function budiniBot(s, me, g, B) {
+  const p = s.p[me];
+  if (!p || !active(p) || s.pause > 0) return { x: 0, y: 0 };
+  const lv = B.level, delay = BOT_DELAY[lv], m = B.mem;
+  const R = s.ring;
+  const brk = s.late ? ROPE_BREAK_LATE : ROPE_BREAK;
+  const px = p.x + p.vx * delay, py = p.y + p.vy * delay;
+  const steer = (tx, ty, k = 1) => {
+    const dx = tx - px, dy = ty - py, d = Math.hypot(dx, dy);
+    if (d < 8) return { x: 0, y: 0 };
+    const sp = Math.min(1, d / 60) * k;
+    return { x: (dx / d) * sp, y: (dy / d) * sp };
+  };
+
+  // Grabbed: headbutt my way out (the easy bot needs a moment to think of it).
+  if (p.held) {
+    if (lv === 0 && !m.heldT) m.heldT = g.t;
+    const ok = lv > 0 || g.t - m.heldT > 0.5;
+    return { x: 0, y: 0, tapB: ok && p.cd <= 0 && p.dizzy <= 0 };
+  }
+  m.heldT = 0;
+  if (p.dizzy > 0 || p.fly > 0) return { x: CX - p.x, y: CY - p.y };
+
+  // The ram (camion): get out of its lane.
+  const t = s.truck;
+  if (t.st && lv > 0 || t.st === 2) {
+    const pc = t.o === 0 ? py : px;
+    const half = LANE / 2 + p.r * 0.6 + 40;
+    if (Math.abs(pc - t.c) < half) {
+      let sg = pc >= t.c ? 1 : -1;
+      const mid = t.o === 0 ? CY : CX;
+      if (Math.abs(t.c + sg * (half + 30) - mid) > R - 60) sg = -sg;
+      return t.o === 0 ? { x: 0, y: sg } : { x: sg, y: 0 };
+    }
+  }
+
+  // Carrying someone: walk them to the nearest rope and throw them over it.
+  if (p.grab >= 0) {
+    const o = s.p[p.grab];
+    const ox = o.x + o.vx * delay, oy = o.y + o.vy * delay;
+    const rp = nearestRope(ox, oy, R, o.r);
+    const mass = clamp(Math.sqrt(p.m / o.m), 0.7, 1.4);
+    const v0 = (o.dizzy > 0 ? THROW_DIZZY : THROW) * mass * (0.85 + 0.45 * p.spin / SPIN_FULL) + 60;
+    // Speed left when it reaches the rope (flying bodies lose speed fast).
+    const vAt = v0 - rp.d * 1.25;
+    const need = s.broken ? 0 : brk + [40, 60, 80][lv];
+    const late = p.grabT > GRAB_MAX - 0.25 - delay && o.dizzy <= 0;
+    if (vAt > need || (late && lv > 0)) {
+      // Throw: let go of A with the stick toward the rope.
+      return { x: rp.nx, y: rp.ny, a: false };
+    }
+    // Clever bots slam a victim that is far from every rope (stun now, throw it later).
+    if (lv === 2 && p.cd <= 0 && rp.d > 300 && o.dizzy <= 0 && o.stun > 0.5) return { x: rp.nx, y: rp.ny, a: true, tapB: true };
+    // Walk so that the victim (held in front of me) goes toward the rope.
+    return { x: rp.nx, y: rp.ny, a: true };
+  }
+
+  // Free: pick a target (the clever bots prefer dizzy ones and those close to a rope).
+  let tgt = null, best = Infinity;
+  for (const o of s.p) {
+    if (o === p || !active(o)) continue;
+    const d = dist(p.x, p.y, o.x, o.y);
+    let sc = d;
+    if (lv > 0) {
+      sc -= o.dizzy > 0 ? 200 : 0;
+      sc += nearestRope(o.x, o.y, R, o.r).d * 0.4;
+      if (o.held) sc += 250;
+    }
+    if (sc < best) { best = sc; tgt = o; }
+  }
+  if (!tgt) return steer(CX, CY);
+  const lead = delay + 0.05;
+  const tx = tgt.x + tgt.vx * lead, ty = tgt.y + tgt.vy * lead;
+  const dx = tx - px, dy = ty - py, d = Math.hypot(dx, dy) || 1;
+  const ex = dx / d, ey = dy / d;
+  const rs = p.r + tgt.r;
+  const grabRange = p.r * 0.45 + p.reach + tgt.r + HAND_R;
+
+  // A rival reaching for me: the clever bots headbutt first.
+  const threat = tgt.ext > 0.3 && tgt.grab < 0 && (tgt.fx * -ex + tgt.fy * -ey) > 0.7 && d < grabRange + 40;
+  const useHB = lv === 2 ? 1 : lv === 1 ? 0.5 : 0.1;
+  if (p.cd <= 0 && d < rs + 110 && !tgt.held && tgt.dizzy <= 0 && (threat || tgt.stun > 0.55 || (s.late && nearestRope(tgt.x, tgt.y, R, tgt.r).d < 120))) {
+    if (!m.hbRoll || g.t - m.hbRoll > 0.4) { m.hbRoll = g.t; m.hbOk = B.rng() < useHB; }
+    if (m.hbOk) return { x: ex, y: ey, tapB: true };
+  }
+  // Close enough: stretch the arms toward them.
+  const reachNow = d < grabRange + 30;
+  // Approach from the centre side so the catch ends up near a rope.
+  let gx = tx, gy = ty;
+  if (!reachNow && lv > 0) {
+    const n = norm(tx - CX || 0.01, ty - CY);
+    gx = tx - n.x * rs * 0.6; gy = ty - n.y * rs * 0.6;
+  }
+  // Stay away from the ropes myself when the ring is small / ropes are weak.
+  const mine = nearestRope(px, py, R, p.r);
+  if (mine.d < 60 && !reachNow) { gx -= mine.nx * 80; gy -= mine.ny * 80; }
+  const st = steer(gx, gy);
+  // Face the target while reaching (the stick sets the facing).
+  if (reachNow) return { x: ex, y: ey, a: true };
+  return { x: st.x, y: st.y, a: d < grabRange + 90 };
+}
+
 export default {
   id: 'budini',
   name: 'Budini a Corte',
@@ -394,6 +508,8 @@ export default {
     }
     return best.i;
   },
+
+  bot: budiniBot,
 
   view(s) {
     const t = s.truck;

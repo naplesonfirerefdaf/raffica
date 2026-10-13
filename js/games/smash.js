@@ -388,6 +388,23 @@ function updatePlayer(s, g, p, inp, dt) {
   if (wasGround && !p.ground && p.vy >= 0) p.coyote = 0.1;
 }
 
+// ---------- Bot helpers ----------
+const BOT_LAG = [0.34, 0.2, 0.09].map((d) => d + 1 / 60); // the driver's reaction delay per level (+1 tick)
+
+// Off the bridge (or under it): steer back, double jump, and use the rising uppercut as a last resort.
+function botRecover(p, w, L, M, t) {
+  const dirIn = p.x < SCX ? 1 : -1;
+  const outside = p.x < SX0 - 4 || p.x > SX1 + 4;
+  const under = !outside && p.y - p.r > STOP - 10;
+  w.sx = w.x = under ? -dirIn : dirIn;
+  const low = p.y > STOP - [60, 110, 140][L];
+  if (p.vy > -150 && low && !under) {
+    if (p.jumps > 0) { if (t - (M.jumpT || -9) > 0.25) { w.tapB = true; M.jumpT = t; } }
+    else if (!p.upUsed && p.y > STOP - 40) { w.tapA = true; w.sy = w.y = -1; w.sx = w.x = dirIn * 0.6; }
+  }
+  return w;
+}
+
 // Damage card position along the top of the screen, in seat order (like the match HUD).
 function cardX(i, n) {
   const order = [...Array(Math.max(2, n)).keys()];
@@ -606,6 +623,115 @@ export default {
     s.cheer = Math.max(0, s.cheer - dt);
     s.mat = Math.max(0, s.mat - dt * 2.5);
     s.rope[0] = Math.max(0, s.rope[0] - dt * 2); s.rope[1] = Math.max(0, s.rope[1] - dt * 2);
+  },
+
+  // Computer player: chases the best rival, hits it towards the nearest edge (smash when it is stunned or
+  // heavily damaged), jumps to the scaffolds, recovers when knocked off. Cavaliere and Re also dodge bombs,
+  // interrupt charged smashes and grab mallets; Re predicts movement and goes for the most damaged rival.
+  bot(s, me, g, B) {
+    const M = B.mem, L = B.level, p = s.p[me], lag = BOT_LAG[L], t = g.t;
+    const w = { x: 0, y: 0, sx: 0, sy: 0 };
+    if (g.ended || p.st === 'ko' || p.st === 'spawn') { M.chargeT = 0; return w; }
+    // Rival to chase.
+    let q = null, qc = Infinity;
+    for (const o of s.p) {
+      if (o === p || o.st === 'ko' || o.lives <= 0) continue;
+      const c = Math.abs(o.x - p.x) + Math.abs(o.y - p.y) * 0.7 + (o.st !== 'alive' || o.inv > 0 ? 500 : 0) - (L === 2 ? o.dmg * 2 : 0);
+      if (c < qc) { qc = c; q = o; }
+    }
+    if (p.st === 'plat') {
+      if (p.platT < 2.5 - [1.0, 0.5, 0.25][L]) w.sx = w.x = q && q.x < p.x ? -1 : 1;
+      return w;
+    }
+    // Charged smash in progress: keep A down, release towards the rival.
+    if (M.chargeT) {
+      if (p.hitstun > 0 || p.st !== 'alive') M.chargeT = 0;
+      else if (t < M.chargeT) { w.a = true; return w; }
+      else {
+        M.chargeT = 0;
+        if (M.chargeUp) w.sy = w.y = -1;
+        else w.sx = w.x = M.chargeDir;
+        return w;
+      }
+    }
+    // Off the bridge: get back first.
+    if (!p.ground && (p.x < SX0 - 4 || p.x > SX1 + 4 || p.y - p.r > STOP - 10)) return botRecover(p, w, L, M, t);
+    const busy = !!p.ak || p.hold >= 0 || p.hitstun > 0;
+    // Bombs about to blow up next to me (Cavaliere, Re): step away.
+    if (L >= 1) {
+      for (const bo of s.bombs) {
+        if (bo.own === me && bo.t < 0.4) continue;
+        const ax = bo.x + bo.vx * 0.3, ay = bo.y + bo.vy * 0.3;
+        if (Math.abs(ax - p.x) < ER + 20 && ay > p.y - 420 && ay < p.y + 120 && (bo.vy > 0 || Math.abs(bo.y - p.y) < 200)) {
+          let d = p.x > ax ? 1 : -1;
+          if ((d < 0 && p.x < SX0 + 120) || (d > 0 && p.x > SX1 - 120)) d = -d;
+          w.sx = w.x = d;
+          return w;
+        }
+      }
+      for (const o of s.items) {
+        if (o.k === 'bomb' && o.fuse > 0 && Math.abs(o.x - p.x) < ER + 30 && Math.abs(o.y - p.y) < ER) { w.sx = w.x = p.x > o.x ? 1 : -1; return w; }
+      }
+    }
+    if (!q) { w.sx = w.x = Math.abs(p.x - SCX) > 60 ? Math.sign(SCX - p.x) : 0; return w; }
+    // Where the rival will be when my move lands.
+    const k = L === 2 ? lag + 0.08 : L === 1 ? lag * 0.5 : 0;
+    const tx = q.x + q.vx * k, ty = q.y + (q.ground ? 0 : q.vy * k * 0.5);
+    const dx = tx - p.x, dy = ty - p.y, adx = Math.abs(dx), face = dx >= 0 ? 1 : -1;
+    const reach = 2.7 * p.r, near = adx < reach && Math.abs(dy) < p.r * 1.3;
+    const ready = !busy && t > (M.atkT || 0);
+    const attack = (tap) => { M.atkT = t + [0.4, 0.3, 0.25][L]; return tap; };
+    // A rival charging a smash next to me: interrupt it (Re) or back off (Cavaliere).
+    if (L >= 1 && q.hold >= 0.15 && adx < reach * 1.4 && Math.abs(dy) < p.r * 1.5) {
+      if (L === 2 && near && ready) { w.tapA = attack(true); w.sx = w.x = face * 0.5; return w; }
+      if (p.dodgeCd <= 0 && q.hold > 0.6 && L === 2) { w.tapB = true; w.sy = w.y = 1; return w; }
+      w.sx = w.x = -face;
+      if ((p.x < SX0 + 100 && face > 0) || (p.x > SX1 - 100 && face < 0)) w.sx = w.x = face; // no room: go through
+      return w;
+    }
+    // Items.
+    if (p.item === 'hammer') {
+      if (ready && adx < 3.3 * p.r && Math.abs(dy) < p.r * 1.4) { w.tapA = attack(true); w.sx = w.x = face * 0.5; return w; }
+    } else if (p.item === 'bomb') {
+      if (ready && adx < 700 && adx > 120 && Math.abs(dy) < p.r * 1.5) { w.tapA = attack(true); w.sx = w.x = face * 0.5; return w; }
+    } else if (ready) {
+      // Up: rival right above me. Down (in the air): rival right below.
+      if (adx < p.r * 1.4 && dy < -p.r * 0.8 && dy > -p.r * 3.4) { w.tapA = attack(true); w.sy = w.y = -1; return w; }
+      if (!p.ground && adx < p.r * 1.1 && dy > p.r * 0.8 && dy < p.r * 3) { w.tapA = attack(true); w.sy = w.y = 1; return w; }
+      if (near) {
+        // Facing the nearest edge of the rival (or just anyhow for the Scudiero), a smash finishes the job.
+        const kill = q.hitstun > 0.2 || q.dmg >= [60, 40, 30][L] || (s.n > 2 && q.dmg > 40 && L === 2);
+        if (p.ground && kill && B.rng() < [0.6, 1, 1][L]) {
+          M.chargeT = t + 0.32 + (q.hitstun > 0.4 ? 0.2 : 0);
+          M.chargeDir = face; M.chargeUp = dy < -p.r;
+          M.atkT = t + 0.6;
+          w.a = true;
+          return w;
+        }
+        w.tapA = attack(true); w.sx = w.x = face * 0.5;
+        return w;
+      }
+    }
+    // Pick up a mallet lying close by (Cavaliere, Re).
+    if (L >= 1 && !p.item) {
+      for (const o of s.items) {
+        if (o.k === 'hammer' && Math.abs(o.x - p.x) < 260 && Math.abs(o.y - p.y) < 160 && o.x > SX0 + 30 && o.x < SX1 - 30) {
+          w.sx = w.x = Math.sign(o.x - p.x);
+          return w;
+        }
+      }
+    }
+    // Movement: stand on the side of the rival that sends it towards its nearest edge.
+    const toEdge = L === 0 ? (dx >= 0 ? 1 : -1) : q.x < SCX ? -1 : 1;
+    let gx = tx - toEdge * reach * 0.7;
+    if (Math.sign(gx - p.x) !== Math.sign(tx - p.x) && adx < reach) gx = p.x; // already in place
+    gx = clamp(gx, SX0 + 45, SX1 - 45);
+    if (Math.abs(gx - p.x) > 18) w.sx = w.x = Math.sign(gx - p.x);
+    // Up to the scaffolds / down from them.
+    if (dy < -p.r * 2.2 && adx < 320 && p.ground && t - (M.jumpT || -9) > 0.4) { w.tapB = true; M.jumpT = t; }
+    else if (!p.ground && dy < -p.r * 2 && p.vy > 0 && p.jumps > 0 && adx < 260 && t - (M.jumpT || -9) > 0.3) { w.tapB = true; M.jumpT = t; }
+    else if (dy > p.r * 2 && p.ground && p.onThin) w.sy = w.y = 1;
+    return w;
   },
 
   timeout(s, g) {

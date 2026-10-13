@@ -33,6 +33,141 @@ function collideArena(o, rest, nb = 6) {
 
 const mass = (p) => p.m0 * (p.r / p.base) ** 2;
 
+// ---- Computer player ----
+const BOT_DELAY = [0.34, 0.2, 0.09]; // reaction delay of the bot driver per level (core/bots.js)
+
+// Route around the braziers/tables: if the straight line hits a block, head for its best corner instead.
+function botRoute(s, x, y, r, gx, gy, margin = 12) {
+  for (let k = 0; k < s.nb; k++) {
+    const b = BLOCKS[k], m = r + margin;
+    const x0 = b.x - m, y0 = b.y - m, x1 = b.x + b.w + m, y1 = b.y + b.h + m;
+    // Segment vs expanded rect (slab test).
+    let t0 = 0, t1 = 1;
+    const dx = gx - x, dy = gy - y;
+    let hit = true;
+    for (const [p0, d, lo, hi] of [[x, dx, x0, x1], [y, dy, y0, y1]]) {
+      if (Math.abs(d) < 1e-6) { if (p0 < lo || p0 > hi) { hit = false; break; } continue; }
+      let a = (lo - p0) / d, c = (hi - p0) / d;
+      if (a > c) [a, c] = [c, a];
+      t0 = Math.max(t0, a); t1 = Math.min(t1, c);
+      if (t0 > t1) { hit = false; break; }
+    }
+    // (A goal hugging the block itself is reached directly.)
+    if (!hit || (x > x0 && x < x1 && y > y0 && y < y1) || (gx > x0 && gx < x1 && gy > y0 && gy < y1)) continue;
+    let best = null, bc = Infinity;
+    for (const [cx, cy] of [[x0 - 4, y0 - 4], [x1 + 4, y0 - 4], [x0 - 4, y1 + 4], [x1 + 4, y1 + 4]]) {
+      const c = Math.hypot(cx - x, cy - y) + Math.hypot(gx - cx, gy - cy);
+      if (c < bc) { bc = c; best = { x: cx, y: cy }; }
+    }
+    return best;
+  }
+  return { x: gx, y: gy };
+}
+
+function mollalaBot(s, me, g, B) {
+  const p = s.p[me];
+  if (!p || p.out || s.boom >= 0) return { x: 0, y: 0 };
+  const lv = B.level, delay = BOT_DELAY[lv];
+  const st = s.star, bomb = s.fuse > 0;
+  const px = p.x + p.vx * delay, py = p.y + p.vy * delay;
+  const steer = (gx, gy) => {
+    const w = botRoute(s, p.x, p.y, p.r, gx, gy);
+    const T = 0.3 + delay;
+    let vx = (w.x - px) / T, vy = (w.y - py) / T;
+    const v = Math.hypot(vx, vy);
+    if (v > MAX_SPEED) { vx *= MAX_SPEED / v; vy *= MAX_SPEED / v; }
+    const G = Math.max(220, 1500 * delay);
+    let ux = (vx - p.vx) / G, uy = (vy - p.vy) / G;
+    const m = Math.hypot(ux, uy);
+    if (m > 1) { ux /= m; uy /= m; }
+    return { x: ux, y: uy };
+  };
+  const rivals = s.p.filter((q) => q !== p && !q.out);
+  const holding = st.holder === me;
+
+  // Dodge an incoming ram (when it matters: I carry the crown, or someone carrying the bomb).
+  const mustDodge = bomb ? (st.holder >= 0 && st.holder !== me) : holding;
+  if (mustDodge && lv > 0 && p.dcd <= 0 && p.dash <= 0) {
+    for (const q of rivals) {
+      const dx = p.x - q.x, dy = p.y - q.y, d = Math.hypot(dx, dy) || 1;
+      const closing = (q.vx * dx + q.vy * dy) / d;
+      const gap = d - p.r - q.r;
+      // Ram on its way, or a rival ready to ram, facing me and so close that I could not react in time.
+      const coming = q.dash > 0 && closing > 300 && gap / closing < delay + 0.12;
+      const ready = q.dash <= 0 && q.cd <= delay && gap < 1000 * delay + 50 && (q.fx * dx + q.fy * dy) / d > 0.8 && q.stun <= 0;
+      if (coming || ready) {
+        // Hop sideways (the side away from the walls).
+        let sx = -dy / d, sy = dx / d;
+        if (Math.hypot(p.x + sx * 120 - CX, p.y + sy * 120 - CY) > Math.hypot(p.x - sx * 120 - CX, p.y - sy * 120 - CY)) { sx = -sx; sy = -sy; }
+        return { x: sx, y: sy, tapB: true };
+      }
+    }
+  }
+
+  // Run away: from the crown hunters (or from the bomb carrier / the rolling bomb).
+  const flee = (threats) => {
+    let fx = 0, fy = 0;
+    for (const t of threats) {
+      const dx = px - t.x, dy = py - t.y, d = Math.max(40, Math.hypot(dx, dy));
+      const w = t.w / (d * d);
+      fx += dx * w; fy += dy * w;
+    }
+    // Walls and corners push back toward the open middle.
+    const lo = WALL + p.r + 90, hi = W - WALL - p.r - 90;
+    // (Beginners forget about the walls and get cornered.)
+    const wk = lv === 0 ? 0.0012 : 0.004;
+    if (px < lo) fx += (lo - px) * wk; if (px > hi) fx -= (px - hi) * wk;
+    if (py < lo) fy += (lo - py) * wk; if (py > hi) fy -= (py - hi) * wk;
+    fx += (CX - px) * 0.0004; fy += (CY - py) * 0.0004;
+    const n = norm(fx, fy);
+    return steer(px + n.x * 200, py + n.y * 200);
+  };
+
+  if (!bomb) {
+    if (holding) {
+      const look = lv === 0 ? 0 : 0.3;
+      return flee(rivals.map((q) => ({ x: q.x + q.vx * look, y: q.y + q.vy * look, w: q.cd <= 0.2 && lv > 0 ? 1.6 : 1 })));
+    }
+    if (st.holder < 0) {
+      // Crown loose: go get it (predict where it rolls), ram whoever is about to take it.
+      const k = 1 - Math.pow(0.3, 0.4);
+      const sx = st.x + st.vx * k / 1.2, sy = st.y + st.vy * k / 1.2;
+      const want = steer(sx, sy);
+      return want;
+    }
+  } else if (st.holder < 0) {
+    // Loose bomb: keep away from it.
+    return flee([{ x: st.x, y: st.y, w: 1.5 }, ...rivals.map((q) => ({ x: q.x, y: q.y, w: 0.2 }))]);
+  } else if (!holding) {
+    // Someone has the bomb: stay away from them.
+    const h = s.p[st.holder];
+    return flee([{ x: h.x + h.vx * 0.3, y: h.y + h.vy * 0.3, w: 1.5 }]);
+  }
+
+  // Hunting: the crown holder (or, with the bomb, the nearest rival to pass it to).
+  let tgt = null;
+  if (!bomb) tgt = s.p[st.holder];
+  else {
+    let bd = Infinity;
+    for (const q of rivals) { const d = dist(p.x, p.y, q.x, q.y); if (d < bd && q.dodge <= 0) { bd = d; tgt = q; } }
+  }
+  if (!tgt) return steer(CX, CY);
+  const d0 = dist(px, py, tgt.x, tgt.y);
+  const tHit = Math.max(0, d0 - p.r - tgt.r) / DASH_SPEED;
+  const lead = (lv === 0 ? 0.05 : delay) + tHit;
+  const tx = tgt.x + tgt.vx * lead, ty = tgt.y + tgt.vy * lead;
+  const dx = tx - px, dy = ty - py, d = Math.hypot(dx, dy) || 1;
+  const range = [170, 250, 260][lv] + p.r + tgt.r;
+  const passOk = !bomb || s.passLock <= 0;
+  // Ram if the line is clear (a block in the way would eat the charge).
+  if (p.cd <= 0 && d < range && passOk && tgt.dodge <= 0) {
+    const w = botRoute(s, px, py, p.r * 0.5, tx, ty, -4);
+    if (w.x === tx && w.y === ty) return { x: dx / d, y: dy / d, tapA: true };
+  }
+  // Chase (cut the corner toward where they are going).
+  return steer(tx, ty);
+}
+
 const game = {
   id: 'mollala',
   name: 'Mollala, Maestà!',
@@ -348,6 +483,8 @@ const game = {
     for (const q of cands) { const d = dS(q); if (d < bd) { bd = d; best = q; } }
     return best.i;
   },
+
+  bot: mollalaBot,
 
   view(s) {
     const st = s.star, bomb = s.fuse > 0;

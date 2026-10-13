@@ -368,6 +368,8 @@ export default {
     return v.p.map((p) => ({ x: p.x, y: p.y }));
   },
 
+  bot(s, me, g, B) { return pavBot(s, me, g, B); },
+
   // 3D: a floating hex floor in the heart of a dwarven mine, above a sea of lava. Rocky cliffs and mine
   // ledges all around, a colonnade of dwarven pillars with banners in the back, torches and rising embers.
   render3d: {
@@ -763,3 +765,153 @@ export default {
     if (v.sd) d.ring(CX, CY, ARENA_R + 12, blink ? '#ff3b3b' : '#ff3b3b55', 6);
   },
 };
+
+// ---------------------------------------------------------------- Bot ----------------------------------------------------------------
+// Never stands still: a timed BFS over the tiles of its floor (cracked tiles only if they hold long enough), then runs
+// toward the reachable tile with the most solid floor around it (springs downstairs are gold), planning from where its
+// own momentum will carry it. Hops over a hole when boxed in; shoves rivals that stand next to a hole (difficile checks
+// the push line, Scudiero shoves at random). With "Polvere Nera" only difficile uses the blast (and hops out of it).
+const V_PEND = [0.34, 0.2, 0.09];
+const STEP_T = HW / MAX_SPEED;
+let NB = null, NB2 = null;
+function pavNeighbors() {
+  if (NB) return;
+  NB = TILES.map((t) => TILES.map((q, j) => j).filter((j) => { const d = Math.hypot(TILES[j].x - t.x, TILES[j].y - t.y); return d > 1 && d < HW * 1.1; }));
+  NB2 = TILES.map((t) => TILES.map((q, j) => j).filter((j) => { const d = Math.hypot(TILES[j].x - t.x, TILES[j].y - t.y); return d > 1 && d < HW * 2.1; }));
+}
+
+// Will tile k of this layer still hold us at time `at` (seconds from now)?
+function holds(s, layer, k, at) {
+  const st = s.st[layer][k];
+  if (st === OK || st === SPRING) return true;
+  if (st === CRACK || st === FUSE) return s.tm[layer][k] > at;
+  return false;
+}
+// Solid floor around tile k (2 rings, OK tiles only).
+function openAround(s, layer, k) {
+  let n = 0;
+  const st = s.st[layer];
+  for (const j of NB2[k]) if (st[j] === OK || st[j] === SPRING) n++;
+  for (const j of NB[k]) if (st[j] === OK || st[j] === SPRING) n += 1.5;
+  return n;
+}
+
+function pavBot(s, me, g, B) {
+  pavNeighbors();
+  const p = s.p[me], L = B.level;
+  const out = { x: 0, y: 0 };
+  if (!p || p.out) return out;
+  const m = B.mem;
+  const delay = V_PEND[L];
+  const layer = p.layer;
+  if (p.drop > 0) return out;
+  // Plan from where our momentum takes us during the reaction delay.
+  let x = p.x + p.vx * delay * 0.8, y = p.y + p.vy * delay * 0.8;
+  let k0 = tileAt(x, y);
+  if (k0 < 0 || !holds(s, layer, k0, 0)) { x = p.x; y = p.y; k0 = tileAt(x, y); }
+  if (k0 < 0) return out;
+
+  // Timed BFS over tiles that still hold when we get there.
+  const dist = m.dist || (m.dist = new Int16Array(TILES.length));
+  const prev = m.prev || (m.prev = new Int16Array(TILES.length));
+  const q = m.q || (m.q = new Int16Array(TILES.length));
+  dist.fill(-1);
+  dist[k0] = 0; prev[k0] = -1; q[0] = k0;
+  let h = 0, n = 1;
+  while (h < n) {
+    const k = q[h++], d = dist[k] + 1;
+    if (d > 7) continue;
+    for (const j of NB[k]) {
+      if (dist[j] >= 0 || !holds(s, layer, j, d * STEP_T + delay * 0.5 + 0.1)) continue;
+      dist[j] = d; prev[j] = k; q[n++] = j;
+    }
+  }
+
+  // Score the reachable tiles.
+  const foes = s.p.filter((o) => o.i !== me && !o.out && !o.drop && o.layer === layer);
+  let best = -1, bv = -Infinity;
+  for (let a = 1; a < n; a++) {
+    const k = q[a], st = s.st[layer][k];
+    if (st !== OK && st !== SPRING) continue;
+    let v = openAround(s, layer, k) - dist[k] * (L === 0 ? 1.6 : 1.1);
+    if (st === SPRING) v += L === 0 ? 15 : 40;
+    for (const o of foes) {
+      const d = Math.hypot(TILES[k].x - o.x, TILES[k].y - o.y);
+      if (d < 140) v -= (140 - d) / 140 * (L === 2 ? 6 : 3);
+    }
+    v -= Math.hypot(TILES[k].x - CX, TILES[k].y - CY) / 220; // the rim has fewer ways out
+    if (k === m.goal) v += 1.5;
+    if (v > bv) { bv = v; best = k; }
+  }
+  // Easy bot: now and then just runs to some random nearby tile.
+  if (L === 0 && n > 1) {
+    if (!(m.wT > g.t) && B.rng() < 0.01) { m.wT = g.t + 0.8; m.wk = q[1 + ((B.rng() * (n - 1)) | 0)]; }
+    if (m.wT > g.t && dist[m.wk] > 0 && s.st[layer][m.wk] === OK) best = m.wk;
+  }
+  m.goal = best;
+
+  // Boxed in (or nothing good nearby): hop over the hole toward the best landing tile.
+  const hopLen = HOP_SPEED * HOP_T;
+  if (p.hop <= 0 && p.hcd <= 0 && (best < 0 || bv < 4) && (L > 0 || B.rng() < 0.3)) {
+    let ba = null, hv = best < 0 ? -Infinity : bv + 2;
+    for (let a = 0; a < 12; a++) {
+      const ang = (a * Math.PI) / 6, lx = p.x + Math.cos(ang) * hopLen, ly = p.y + Math.sin(ang) * hopLen;
+      const k = tileAt(lx, ly);
+      if (k < 0 || !holds(s, layer, k, HOP_T + 0.4) || !onFloor(lx, ly)) continue;
+      const v = openAround(s, layer, k) + (s.st[layer][k] === SPRING ? 30 : 0);
+      if (v > hv) { hv = v; ba = ang; }
+    }
+    if (ba !== null) { out.x = Math.cos(ba); out.y = Math.sin(ba); out.tapA = true; m.goal = -1; return out; }
+  }
+
+  // Steer to the next tile on the path (or away from the cracking one).
+  let tx, ty;
+  if (best >= 0) {
+    let k = best;
+    while (prev[k] >= 0 && prev[k] !== k0) k = prev[k];
+    tx = TILES[k].x; ty = TILES[k].y;
+    // Already on top of it: aim one step further so we never slow down.
+    if (Math.hypot(tx - x, ty - y) < 25 && k !== best) { let k2 = best; while (prev[k2] >= 0 && prev[k2] !== k) k2 = prev[k2]; tx = TILES[k2].x; ty = TILES[k2].y; }
+  } else {
+    tx = TILES[k0].x * 2 - p.x; ty = TILES[k0].y * 2 - p.y; // nothing reachable: at least keep moving
+  }
+  const dx = tx - x, dy = ty - y, d = Math.hypot(dx, dy) || 1;
+  out.x = dx / d; out.y = dy / d;
+
+  // Shove a rival next to a hole.
+  if (p.scd <= 0 && foes.length && !g.ended) {
+    const mina = g.variant === 'mina';
+    for (const o of foes) {
+      const dd = Math.hypot(o.x - p.x, o.y - p.y);
+      if (dd > (mina ? 180 : SHOVE_R - 20)) continue;
+      if (mina) {
+        // Only the hard bot, and only with the hop ready to leave the blast ring.
+        if (L === 2 && p.hcd <= 0 && o.hop <= 0) { out.tapB = true; m.mineHop = g.t + 0.05; }
+        continue;
+      }
+      if (L === 0) { if (B.rng() < 0.03) out.tapB = true; continue; }
+      // Is there a hole along the push line (or near the rival for the medium bot)?
+      const ux = (o.x - p.x) / (dd || 1), uy = (o.y - p.y) / (dd || 1);
+      let hole = false;
+      for (let a = 40; a <= (L === 2 ? 200 : 120); a += 40) {
+        const k = tileAt(o.x + ux * a, o.y + uy * a);
+        if (k >= 0 && !holds(s, layer, k, 0.3)) hole = true;
+      }
+      if (hole || (L === 1 && dd < 90)) out.tapB = true;
+    }
+  }
+  // After our own blast, hop out of the burning ring.
+  if (m.mineHop && g.t > m.mineHop && p.hcd <= 0 && p.hop <= 0) {
+    m.mineHop = 0;
+    let ba = null, hv = -Infinity;
+    for (let a = 0; a < 12; a++) {
+      const ang = (a * Math.PI) / 6, lx = p.x + Math.cos(ang) * hopLen, ly = p.y + Math.sin(ang) * hopLen;
+      const k = tileAt(lx, ly);
+      if (k < 0 || !onFloor(lx, ly) || s.st[layer][k] !== OK) continue;
+      const v = openAround(s, layer, k);
+      if (v > hv) { hv = v; ba = ang; }
+    }
+    if (ba !== null) { out.x = Math.cos(ba); out.y = Math.sin(ba); out.tapA = true; }
+  }
+  return out;
+}

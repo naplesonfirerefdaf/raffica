@@ -189,8 +189,8 @@ function mokaPlan(s, me, M, L) {
   const dMine = 0.5 + 0.3 * (2 - L), dOther = M.dur || 1.5; // expected turn lengths (the fire gets hot at 10 s)
   let best = null;
   s.m.forEach((m, k) => {
-    // Re and Cavaliere remember every gauge movement of the round, Scudiero only the last two.
-    const post = posterior(m.p, lo, hi, L ? M.obs[k] : M.obs[k].slice(-2));
+    // Re and Cavaliere remember every gauge movement of the round, Scudiero only the last three.
+    const post = posterior(m.p, lo, hi, L ? M.obs[k] : M.obs[k].slice(-3));
     const opts = [];
     if (s.pumps && k !== s.sel[me]) return; // halfway through a turn: keep the same cauldron
     if (s.valve[me] && m.p > 0 && !s.pumps) opts.push({ vent: true, k: 0, sel: k });

@@ -341,7 +341,7 @@ function hockeyBot(s, me, g, B) {
       const tHit = (d - rs - 20) / closing;
       // Will it actually pass near me?
       const perp = Math.abs(pk.vx * dy - pk.vy * dx) / (pSpeed * d) * d;
-      if (perp < SHIELD_R + PUCK_R && tHit > delay - 0.05 && tHit < delay + 0.22 && (lv === 2 || B.rng() < 0.7)) {
+      if (perp < SHIELD_R + PUCK_R && tHit > delay - 0.05 && tHit < delay + 0.22 && (lv > 0)) {
         return { x: 0, y: 0, b: true };
       }
     }
@@ -354,13 +354,13 @@ function hockeyBot(s, me, g, B) {
     let bk = -1, bc = Infinity;
     for (let k = 0; k < n; k++) {
       if (k === me) continue;
-      const a = shotAim(s, k, P.x, P.y, true);
+      const a = shotAim(s, k, P.x, P.y, lv > 0);
       const c = Math.hypot(a.x - P.x, a.y - P.y) + (lv === 0 ? 0 : s.score[k] * -30);
       if (c < bc) { bc = c; bk = k; }
     }
     return bk;
   })();
-  const aim = shotAim(s, aimGoal, P.x, P.y, true);
+  const aim = shotAim(s, aimGoal, P.x, P.y, lv > 0);
   let ax = aim.x - P.x, ay = aim.y - P.y;
   { const l = Math.hypot(ax, ay) || 1; ax /= l; ay /= l; }
   // Am I behind the puck (between it and my goal side) on the shooting line?
@@ -395,7 +395,7 @@ function hockeyBot(s, me, g, B) {
   if (!mineNow) {
     // Puck in a rival zone: wait in front of my goal, following it (a bit forward when it is far).
     const dx = P.x - gx, dy = P.y - gy, d = Math.hypot(dx, dy) || 1;
-    const k = clamp(d * 0.28, 150, 300);
+    const k = lv === 0 ? clamp(d * 0.28, 150, 300) : clamp(d * 0.2, 120, 230);
     let tx = gx + (dx / d) * k, ty = gy + (dy / d) * k;
     if (uy) ty = gy - uy * Math.max(150, Math.abs(ty - gy)); else tx = gx - ux * Math.max(150, Math.abs(tx - gx));
     return hockeySteer(m, tx, ty, lag);
@@ -404,7 +404,7 @@ function hockeyBot(s, me, g, B) {
   // Attack: get behind the puck on the shooting line, then drive through it (or smash).
   const lined = back > 0 && Math.abs(side) < rs * (lv === 2 ? 0.35 : 0.5);
   const cosA = back / (Math.hypot(relx, rely) || 1);
-  if (m.cd <= 0 && dP < 300 && dP > rs * 0.8 && cosA > [0.88, 0.975, 0.985][lv]) {
+  if (m.cd <= 0 && dP < 300 && dP > rs * 0.8 && cosA > [0.8, 0.975, 0.985][lv]) {
     // Smash goes straight at the puck: only when the puck sits on the line toward the goal.
     return { x: ax, y: ay, tapA: true };
   }

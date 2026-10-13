@@ -1,6 +1,6 @@
 // Service worker of the installed web app (public site only; not used on the LAN server).
 // Models/fonts/icons: cache-first (big and never change). Code and pages: network-first, cache as offline fallback.
-const CACHE = 'raffica-20261013172108';
+const CACHE = 'raffica-20261013210410';
 const HEAVY = /\/(assets|vendor|icons)\//;
 
 self.addEventListener('install', (e) => {

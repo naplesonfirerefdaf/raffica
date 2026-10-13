@@ -1161,6 +1161,7 @@ export default {
 // (difficile leads the shot), fireball when a rival is in sight, dung behind when chased (or to stop a fireball),
 // potion to ram someone or reach the golden bladder first.
 const P_PEND = [0.34, 0.2, 0.09];
+const PSTEPS = 18;
 const PSIM = { flip: false, bl: BUMPERS.map(() => 0) }; // scratch world for predicting cabbage bounces
 
 // Does segment a->b pass through the rect grown by pad? (slab test)
@@ -1243,30 +1244,49 @@ function pallBot(s, me, g, B) {
   const fa = Math.cos(k.a), fb = Math.sin(k.a);
 
   // --- Danger: cabbages / fireballs coming at us, dung falling from the sky ---
-  let dodge = null;
-  {
-    for (const o of s.sh) {
-      if (o.o === me && o.gr > 0) continue;
-      if (L === 0 && o.o !== me && o.id % 2) continue; // the easy bot only notices some of them
-      // Follow the ball for ~1 s with its bounces (fireballs home on someone else, never their owner).
-      const q = m.shq || (m.shq = { x: 0, y: 0, vx: 0, vy: 0, r: 0 });
-      q.x = o.x; q.y = o.y; q.vx = o.vx; q.vy = o.vy; q.r = o.r;
-      for (let j = 0; j < 18; j++) {
-        const ax = q.x, ay = q.y;
-        q.x += q.vx * 0.05; q.y += q.vy * 0.05;
-        if (o.t === GREEN) collideWorld(PSIM, q, 1, 0);
-        // where we will be at that time (keep rolling)
-        const tt = (j + 1) * 0.05, mx = k.x + k.vx * Math.min(tt, 0.3), my = k.y + k.vy * Math.min(tt, 0.3);
-        if (segNearPt(ax, ay, q.x, q.y, mx, my) < k.r + o.r + 22) {
-          if (L === 2 && k.item === BANANA && k.roll <= 0 && (o.x - k.x) * fa + (o.y - k.y) * fb < 0) out.tapA = true;
+  // Each ball is followed for ~0.9 s with its bounces (fireballs home on someone else, never their owner).
+  let dodge = null, nsp = 0;
+  const SP = m.sp || (m.sp = new Float64Array(8 * PSTEPS * 2));
+  for (const o of s.sh) {
+    if (nsp >= 8) break;
+    if (L === 0 && o.o !== me && o.id % 2) continue; // the easy bot only notices some of them
+    const q = m.shq || (m.shq = { x: 0, y: 0, vx: 0, vy: 0, r: 0 });
+    q.x = o.x; q.y = o.y; q.vx = o.vx; q.vy = o.vy; q.r = o.r;
+    let near = false;
+    for (let j = 0; j < PSTEPS; j++) {
+      const ax = q.x, ay = q.y;
+      q.x += q.vx * 0.05; q.y += q.vy * 0.05;
+      if (o.t === GREEN) collideWorld(PSIM, q, 1, 0);
+      const harmless = o.o === me && o.gr > (j + 1) * 0.05;
+      SP[(nsp * PSTEPS + j) * 2] = harmless ? -1e4 : q.x; SP[(nsp * PSTEPS + j) * 2 + 1] = harmless ? -1e4 : q.y;
+      const tt = (j + 1) * 0.05, mx = k.x + k.vx * Math.min(tt, 0.3), my = k.y + k.vy * Math.min(tt, 0.3);
+      if (!harmless && !near && segNearPt(ax, ay, q.x, q.y, mx, my) < k.r + o.r + 22) {
+        near = true;
+        // Holding dung and something chases us from behind: drop it as a shield.
+        if (L === 2 && k.item === BANANA && k.roll <= 0 && (o.x - k.x) * fa + (o.y - k.y) * fb < 0) out.tapA = true;
+        if (L === 0) {
           const sp = Math.hypot(q.vx, q.vy) || 1;
           const side = (q.vx * (my - ay) - q.vy * (mx - ax)) > 0 ? 1 : -1;
           dodge = [-q.vy / sp * side, q.vx / sp * side];
-          break;
         }
       }
     }
+    if (near) nsp++;
   }
+  // Smallest gap between us (heading toward angle th, as the cart really turns and accelerates) and the balls.
+  const clearance = (th) => {
+    let px = k.x, py = k.y, a = k.a, v = Math.max(0, k.vx * fa + k.vy * fb), worst = Infinity;
+    const top = MAX_SPEED * speedF(s, k);
+    for (let j = 0; j < PSTEPS; j++) {
+      if ((j + 1) * 0.05 > delay) { a += clamp(angleDiff(a, th), -TURN * 0.05, TURN * 0.05); v = Math.min(top, v + ACC * 0.05); }
+      px = clamp(px + Math.cos(a) * v * 0.05, EDGE + k.r, W - EDGE - k.r); py = clamp(py + Math.sin(a) * v * 0.05, EDGE + k.r, H - EDGE - k.r);
+      for (let n = 0; n < nsp; n++) {
+        const d = Math.hypot(SP[(n * PSTEPS + j) * 2] - px, SP[(n * PSTEPS + j) * 2 + 1] - py) - k.r - SHELL_R;
+        if (d < worst) worst = d;
+      }
+    }
+    return worst;
+  };
   for (const f of s.fb) {
     if (f.t < 0.9 && Math.hypot(f.x - x, f.y - y) < k.r + 40) {
       const dx = x - f.x, dy = y - f.y, d = Math.hypot(dx, dy) || 1;
@@ -1280,7 +1300,7 @@ function pallBot(s, me, g, B) {
   if (s.gold) {
     const mine = myDist(s.gold.x, s.gold.y);
     const best = Math.min(...foes.map((q) => Math.hypot(s.gold.x - q.x, s.gold.y - q.y)));
-    if (mine < best * (L === 2 ? 1.3 : L === 1 ? 1.1 : 0.7) || (L === 0 && mine < 220)) { tx = s.gold.x; ty = s.gold.y; why = 'gold'; }
+    if (mine < best * (L === 2 ? 1.3 : L === 1 ? 1.2 : 0.7) || (L === 0 && mine < 220)) { tx = s.gold.x; ty = s.gold.y; why = 'gold'; }
   }
   // Target rival: the nearest (difficile: prefers the leader when close enough).
   let tgt = foes[0], td = Infinity;
@@ -1325,7 +1345,7 @@ function pallBot(s, me, g, B) {
       for (const q of foes) {
         const d = Math.hypot(q.x - k.x, q.y - k.y);
         const tt = d / GREEN_V;
-        const lead = L === 2 ? 1 : L === 1 ? 0.5 : 0;
+        const lead = L === 0 ? 0 : 1;
         const px = q.x + q.vx * tt * lead, py = q.y + q.vy * tt * lead;
         const ang = Math.atan2(py - k.y, px - k.x);
         const tol = Math.atan2(q.r * (L === 0 ? 1.4 : 0.8), d);
@@ -1374,8 +1394,21 @@ function pallBot(s, me, g, B) {
   }
   const dl = Math.hypot(dx, dy) || 1;
   // Slow down a bit for tight goals so we do not orbit them.
-  const mag = d < 90 && why !== 'chase' ? 0.6 : 1;
+  let mag = d < 90 && why !== 'chase' ? 0.6 : 1;
   out.x = (dx / dl) * mag; out.y = (dy / dl) * mag;
+  // Balls around: if our line runs into one, take the heading that keeps the widest gap.
+  if (nsp && k.inv <= 0.3) {
+    const thg = Math.atan2(dy, dx);
+    if (clearance(thg) < 25) {
+      let bt = thg, bv = -Infinity;
+      for (let j = 0; j < 12; j++) {
+        const th = k.a + (j * Math.PI) / 6;
+        const v = Math.min(60, clearance(th)) + Math.cos(angleDiff(th, thg)) * 8;
+        if (v > bv) { bv = v; bt = th; }
+      }
+      out.x = Math.cos(bt); out.y = Math.sin(bt);
+    }
+  }
   // Stuck against something: back off sideways for a moment.
   if (speed < 40 && g.t > 1) { m.stuck = (m.stuck || 0) + (g.dt || 1 / 60); } else m.stuck = 0;
   if (m.stuck > 0.6) { m.unstickT = g.t + 0.5; m.ua = k.a + Math.PI * (0.6 + B.rng() * 0.8); m.stuck = 0; }

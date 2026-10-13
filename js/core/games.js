@@ -4,6 +4,9 @@ export const GAME_IDS = [
   'sumo', 'fuoco', 'vigile', 'moka', 'spaghetto', 'mattarello', 'pavimento',
   'mollala', 'fotobomba', 'tron', 'bombe', 'hockey', 'calcetto',
   'palloncini', 'carri', 'budini', 'lasagna', 'torre', 'smash',
+  // New medieval games (October 2026): files appear as they are written; missing ones are skipped.
+  'stendardo', 'catapulte', 'polli', 'soule', 'ariete', 'ponte',
+  'giostra', 'palio', 'arcieri', 'barili', 'banchetto', 'duello',
 ];
 
 const REQUIRED = ['id', 'name', 'rule', 'cam', 'world', 'controls', 'duration', 'init', 'step', 'view', 'render'];

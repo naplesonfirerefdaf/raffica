@@ -416,45 +416,58 @@ function botEval(f, c, rot, x, prof, goal) {
   let bump = 0;
   const b0 = colOf(CX - BASE_W / 2) + 1, b1 = colOf(CX + BASE_W / 2);
   for (let k = b0; k < b1; k++) bump += Math.min(Math.abs(botTmp[k] - botTmp[k + 1]), 3 * CELL);
-  const K = globalThis.BOT_CFG || {};
-  let sc = -3 * (holes * COLW) / (CELL * CELL) - ((K.wb ?? 0.6) * bump) / CELL - 2.5 * hang - 1.5 * clamp(1 - margin / CELL, 0, 1);
+  let sc = -3 * (holes * COLW) / (CELL * CELL) - (0.6 * bump) / CELL - 2.5 * hang - 1.5 * clamp(1 - margin / CELL, 0, 1);
   if (!stable) sc -= 40;
   const height = (BASE_TOP - top) / CELL;
-  if (goal) sc += 1.2 * height; // last seconds / almost there: as tall as possible
-  else if (K.wh) sc += K.wh * height;
-  else sc -= (0.4 * (BASE_TOP - land)) / CELL; // otherwise fill the low spots first
+  sc += (goal ? 1.2 : 2) * height; // grow (in the last seconds stability counts a bit more)
   if (stable && top <= LINE_Y - 4) sc += 25;
-  sc -= (K.wc ?? 0) * Math.abs(x - CX) / CELL;
-  if (!goal && e.y1 - e.y0 > e.x1 - e.x0 + 1) sc -= K.wt ?? 0; // standing pieces wobble
+  sc -= (5 * Math.abs(x - CX)) / CELL; // a narrow tower in the middle stands best
   return sc;
 }
 
 function botPlan(s, f, c, L, g, rng) {
   towerProfile(f, botProf);
+  // Tower already over the banner: do not risk it, throw the block away beside the cliff.
+  if (f.hold > 0 || f.top <= LINE_Y) {
+    for (const rot of [c.rot, (c.rot + 1) % 4]) {
+      const e = extents(c.k, c.s, (rot * Math.PI) / 2);
+      for (const side of [-1, 1]) {
+        const x = side < 0 ? 6 - e.x0 : W - 6 - e.x1;
+        if (side < 0 ? x + e.x1 > CX - BASE_W / 2 - 4 : x + e.x0 < CX + BASE_W / 2 + 4) continue;
+        let free = true;
+        for (let k = Math.max(0, colOf(Math.min(c.x, x) + e.x0) + 1), k1 = Math.min(NCOL - 1, colOf(Math.max(c.x, x) + e.x1)); k <= k1; k++) {
+          if (botProf[k] < c.y + Math.max(e.y1, c.e.y1) + 4) free = false;
+        }
+        if (free) return { rot, x, sc: 99, away: true };
+      }
+    }
+  }
   const goal = g.t > 50 || f.top - LINE_Y < 3 * CELL;
   let best = null;
-  for (let rot = 0; rot < 4; rot++) {
+  const R0 = L === 0 ? 2 : 0; // Scudiero does not bother turning blocks, and stays near the middle
+  for (let rot = 0; rot < (R0 ? 1 : 4); rot++) {
     const e = extents(c.k, c.s, (rot * Math.PI) / 2);
-    for (let j = -13; j <= 13; j++) {
+    for (let j = R0 ? -R0 : -13; j <= (R0 || 13); j++) {
       const x = c.x + j * STEP;
       if (x < 6 - e.x0 || x > W - 6 - e.x1 || Math.abs(x - CX) > BASE_W / 2 + CELL) continue;
       let sc = botEval(f, c, rot, x, botProf, goal);
       if (sc === null) continue;
-      sc += -0.15 * ((rot - c.rot + 4) % 4) - 0.02 * Math.abs(j) + (rng() - 0.5) * (globalThis.BOT_CFG?.noise ?? [6, 1.5, 0])[L];
+      sc += -0.15 * ((rot - c.rot + 4) % 4) - 0.02 * Math.abs(j) + (rng() - 0.5) * [1.5, 0.5, 0][L];
       if (!best || sc > best.sc) best = { rot, x, sc };
     }
   }
   return best;
 }
 
-// Magic: Re/Cavaliere glue their tower with ivy and curse a rival that is getting close; Scudiero at random.
+// Magic: Re/Cavaliere glue their tower with ivy and curse a rival that is getting close; Scudiero casts at
+// random moments (ivy if there is something to glue).
 function botMagic(s, f, M, L, g, B) {
   if (f.charge <= 0 || g.t < (M.nextMagic || 0)) return 0;
   let glue = 0;
   for (const pc of f.pieces) if (pc.landed && !pc.st && pc.body.getPosition().y * SCALE < BASE_TOP) glue++;
   const last = f.pieces[f.pieces.length - 1];
   const calm = !last || last.body.getLinearVelocity().length() < 0.3;
-  if (L === 0) return B.rng() < 0.01 ? (B.rng() < 0.6 || glue < 3 ? 1 : 2) : 0;
+  if (L === 0) return B.rng() < 0.01 ? (glue >= 3 && calm ? 2 : 1) : 0;
   let other = 0, oppHold = 0;
   for (const o of s.f) if (o !== f) { other = Math.max(other, towerScore(o)); oppHold = Math.max(oppHold, o.hold); }
   const mine = towerScore(f);
@@ -585,8 +598,8 @@ export default {
     }
   },
 
-  // Computer player: reads its tower's skyline, picks the flattest stable spot (taller in the last seconds or
-  // when the banner is close), rotates, steps there one half-cell at a time and drops; uses its magic.
+  // Computer player: reads its tower's skyline, picks a stable spot that makes a narrow tall tower in the middle
+  // (over the banner: throws the block away), rotates, steps there one half-cell at a time and drops; uses magic.
   bot(s, me, g, B) {
     const f = s.f[me], M = B.mem, L = B.level, lag = BOT_LAG[L];
     const w = { x: 0, y: 0, sx: 0, sy: 0 };
@@ -652,10 +665,11 @@ export default {
     if (M.okT < 0) {
       M.okT = g.t;
       towerProfile(f, botProf);
-      M.okHere = botEval(f, c, c.rot, c.x, botProf, false) !== null;
+      M.okHere = T.away || botEval(f, c, c.rot, c.x, botProf, false) !== null;
       if (!M.okHere) { M.tgt = null; M.okT = -1; return w; }
     }
-    if (g.t - M.okT >= [0.15, 0.05, 0][L]) w.sy = w.y = 1;
+    // A gentle push down: with a shaky thumb a full push would also nudge the block sideways.
+    if (g.t - M.okT >= [0.15, 0.05, 0][L]) w.sy = w.y = 0.65;
     return w;
   },
 

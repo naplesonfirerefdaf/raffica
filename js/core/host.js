@@ -22,7 +22,8 @@ export class Host {
     this.settings = { ...DEFAULT_SETTINGS, ...settings };
     this.T = 0;
     const S = [...Array(MAX_PLAYERS).keys()];
-    this.players = S.map((i) => ({ n: `Giocatore ${i + 1}`, on: false, rdy: false, c: DEFAULT_CHARS[i], bot: null }));
+    // team: 0 or 1 (used when settings.teams is on). Default: places 1–2 vs places 3–4 (e.g. two friends vs two bots).
+    this.players = S.map((i) => ({ n: `Giocatore ${i + 1}`, on: false, rdy: false, c: DEFAULT_CHARS[i], bot: null, team: i < 2 ? 0 : 1 }));
     this.botDrv = S.map(() => null); // per slot: input driver of a computer player
     this.inputs = S.map(() => ({ ...EMPTY_INPUT }));
     this.counts = S.map(() => ({ ac: 0, bc: 0 }));
@@ -152,6 +153,14 @@ export class Host {
         } else if (BOT_LEVELS.some((l) => l.id === c.level)) this.addBot(c.level, c.c);
         if (this.phase === 'lobby') this.seats = this.onSlots();
         break;
+      case 'team':
+        // {type:'team', team: 0|1} for my place, or {target: slot, team} (e.g. a bot).
+        if (this.phase !== 'lobby' && this.phase !== 'final') break;
+        {
+          const tg = Number.isInteger(c.target) && this.players[c.target] ? c.target : slot;
+          if (this.players[tg] && (c.team === 0 || c.team === 1)) this.players[tg].team = c.team;
+        }
+        break;
       case 'char':
         if ((this.phase === 'lobby' || this.phase === 'final') && this.players[slot] && CHAR_BY_ID[c.c]) this.players[slot].c = c.c;
         break;
@@ -212,7 +221,8 @@ export class Host {
     const s = {
       T: r3(this.T), ph: this.phase, pt: r3(this.phaseT), pd: this.phaseDur,
       sc: this.score.slice(), tg: this.settings.target, rd: this.round,
-      pl: this.players.map((p) => ({ n: p.n, on: p.on, rdy: p.rdy, c: p.c, bot: p.bot })),
+      pl: this.players.map((p) => ({ n: p.n, on: p.on, rdy: p.rdy, c: p.c, bot: p.bot, tm: p.team })),
+      tm: this.teamsOn(),
       seats: this.seats.slice(),
       g: c ? {
         id: c.def.id, v: c.variant, m: c.mods, t: r3(c.t),
@@ -235,7 +245,7 @@ export class Host {
   applySettings(s) {
     const t = Number(s.target);
     if ([3, 5, 7, 10].includes(t)) this.settings.target = t;
-    for (const k of ['crazy', 'variants', 'loserPicks']) if (typeof s[k] === 'boolean') this.settings[k] = s[k];
+    for (const k of ['crazy', 'variants', 'loserPicks', 'teams']) if (typeof s[k] === 'boolean') this.settings[k] = s[k];
     if (Array.isArray(s.only)) this.settings.only = s.only.filter((id) => this.byId.has(id));
     else if (s.only === null) this.settings.only = null;
   }
@@ -254,11 +264,22 @@ export class Host {
     this.nextRound();
   }
 
+  // Teams are active with 4 seated players split 2 + 2 and the "teams" setting on.
+  teamsOn() {
+    if (!this.settings.teams || this.seats.length !== 4) return false;
+    const a = this.seats.filter((s) => this.players[s].team === 0).length;
+    return a === 2;
+  }
+
   pool() {
     const only = this.settings.only;
     const list = only && only.length ? only : this.games.map((d) => d.id);
     const n = Math.max(2, this.seats.length);
-    const ok = list.filter((id) => this.byId.has(id) && maxPlayersOf(this.byId.get(id)) >= n);
+    // In team matches only games that know about teams (def.teams === true) are drawn.
+    const fit = (def) => maxPlayersOf(def) >= n && (!this.teamsOn() || def.teams === true);
+    const teamOk = this.games.filter(fit).map((d) => d.id);
+    if (this.teamsOn() && !teamOk.length) return this.games.filter((d) => maxPlayersOf(d) >= n).map((d) => d.id);
+    const ok = list.filter((id) => this.byId.has(id) && fit(this.byId.get(id)));
     // Practice lists may contain only 1v1 games: fall back to every game that supports this many players.
     return ok.length ? ok : this.games.filter((d) => maxPlayersOf(d) >= n).map((d) => d.id);
   }
@@ -370,6 +391,8 @@ export class Host {
     const rng = makeRng(this.rng.seed());
     const flags = modFlags(mods, this.seats.map((s) => this.score[s]));
     const n = this.seats.length;
+    // Teams for the game (by SEAT): null in free-for-all. Games that support teams (def.teams) read g.teams / g.ally.
+    const teams = this.teamsOn() && def.teams === true ? this.seats.map((s) => this.players[s].team) : null;
     const c = {
       def, variant, mods, t: 0, startT: this.T, state: null, ended: false, winner: null, text: '',
       slow: [], hitstop: 0, replay, inMods: makeInputMods(mods, rng),
@@ -378,6 +401,7 @@ export class Host {
     const fx = (f, x, y, o = {}) => host.emit({ k: 'fx', f, x, y, ...o });
     c.api = {
       dt: DT, t: 0, n, world: def.world, variant, mods: flags, rng, ended: false,
+      teams, team: (i) => (teams ? teams[i] : i), ally: (i, j) => (teams ? teams[i] === teams[j] : i === j),
       end(winner, text = '') {
         if (c.ended) return;
         c.ended = true; c.api.ended = true;
@@ -492,9 +516,12 @@ export class Host {
     const w = c.winner >= 0 ? this.seats[c.winner] : -1; // seat -> slot
     const x = { w, text: c.text, id: c.def.id, replay: false };
     if (w >= 0) {
-      const others = this.seats.filter((s) => s !== w);
+      // Team match: the whole team of the winner scores.
+      const mates = c.api.teams ? this.seats.filter((s) => this.players[s].team === this.players[w].team) : [w];
+      const others = this.seats.filter((s) => !mates.includes(s));
       const behind = Math.max(...others.map((s) => this.score[s])) - this.score[w];
-      this.score[w] += 1;
+      for (const s of mates) this.score[s] += 1;
+      x.team = c.api.teams ? this.players[w].team : null;
       this.lastLoser = others.length === 1 ? others[0] : this.rng.pick(others);
       const st = this.stats;
       st.wins[w]++;

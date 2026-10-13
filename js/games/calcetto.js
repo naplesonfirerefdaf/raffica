@@ -312,15 +312,39 @@ function calcAim(s, k, px, py, smart) {
     for (const sg of [-1, 1]) {
       const x = clamp(def.x + (-dy / d) * sg * 230, L + br + 30, R - br - 30), y = clamp(def.y + (dx / d) * sg * 230, T + br + 30, B - br - 30);
       consider(x, y, 300, 0);
+      if (best && best.x === x && best.y === y) best.open = false; // a dribble: no big kick
     }
   }
   return best;
 }
 
+// Does a ball kicked from (px, py) along (kx, ky) go into a rival goal, past its keeper?
+function shotOnGoal(s, me, px, py, kx, ky, slack) {
+  const br = s.kind.r;
+  for (let k = 0; k < s.n; k++) {
+    if (k === me) continue;
+    const [gx, gy] = GOAL[k], [sx, sy] = SIDE[k];
+    const toward = kx * sx + ky * sy;
+    if (toward < 0.25) continue;
+    const t = ((gx - px) * sx + (gy - py) * sy) / toward;
+    if (t <= 0) continue;
+    const hx = px + kx * t, hy = py + ky * t;
+    const lat = sy ? Math.abs(hx - gx) : Math.abs(hy - gy);
+    if (lat > s.kind.gw - br * 0.5 + slack) continue;
+    const d = s.cars[k];
+    if (d) {
+      const u = (d.x - px) * kx + (d.y - py) * ky;
+      if (u > 0 && u < t && Math.abs((d.x - px) * ky - (d.y - py) * kx) < d.r + br - 10) continue;
+    }
+    return true;
+  }
+  return false;
+}
+
 function calcettoBot(s, me, g, B) {
   const c = s.cars[me];
   if (!c) return { x: 0, y: 0 };
-  const n = s.n, lv = B.level, delay = BOT_DELAY[lv], mem = B.mem;
+  const n = s.n, lv = B.level, delay = BOT_DELAY[lv];
   const [ux, uy] = SIDE[me], [gx, gy] = GOAL[me];
   // My position once my input lands.
   const mx = c.x + c.vx * delay, my = c.y + c.vy * delay;
@@ -340,7 +364,7 @@ function calcettoBot(s, me, g, B) {
   const rs = c.r + ball.r;
   // Intercept: first moment the ball is where I can be.
   let bt = 0.1, P = ballAt(s, ball, delay + 0.1);
-  if (lv > 0) {
+  {
     for (let t = 0.1; t <= 1.6; t += 0.1) {
       const q = ballAt(s, ball, delay + t);
       const need = Math.max(0, Math.hypot(q.x - mx, q.y - my) - rs) / (c.turbo || lv === 2 ? 800 : 620);
@@ -389,14 +413,51 @@ function calcettoBot(s, me, g, B) {
         if (!defend) defend = { x: uy ? clamp(hit.x, gx - s.kind.gw, gx + s.kind.gw) : gx - ux * 70, y: uy ? gy - uy * 70 : clamp(hit.y, gy - s.kind.gw, gy + s.kind.gw) };
       }
     }
+    // Ball loose near my goal with me on the wrong side: get between the ball and the goal.
+    if (!defend && ballGoal < 520 && !ownSide) {
+      const dx = gx - P.x, dy = gy - P.y, d = Math.hypot(dx, dy) || 1;
+      const k = Math.min(rs + 40, d * 0.5);
+      defend = { x: P.x + (dx / d) * k, y: P.y + (dy / d) * k };
+    }
   }
 
-  let tx, ty;
-  if (defend) {
-    tx = clamp(defend.x, L + c.r + 10, R - c.r - 10); ty = clamp(defend.y, T + c.r + 10, B - c.r - 10);
+  // A rival gets there clearly first: the clever bots fall back goal-side instead of chasing.
+  let shadow = null;
+  if (lv > 0 && !defend) {
+    const myT = Math.hypot(P.x - mx, P.y - my);
+    for (const o of s.cars) {
+      if (o === c) continue;
+      const oT = Math.hypot(P.x - o.x - o.vx * 0.2, P.y - o.y - o.vy * 0.2);
+      if (oT + 180 < myT && !ownSide) {
+        const k = clamp(Math.hypot(P.x - gx, P.y - gy) * 0.45, 150, 420);
+        const dx = P.x - gx, dy = P.y - gy, d = Math.hypot(dx, dy) || 1;
+        shadow = { x: gx + (dx / d) * k, y: gy + (dy / d) * k };
+      }
+    }
+  }
+  // Out of gunpowder and nothing urgent: grab a nearby barrel.
+  let pad = null;
+  if (lv > 0 && !defend && c.boost < 0.3) {
+    let pd = lv === 2 ? 380 : 260;
+    s.padXY.forEach(([px, py], k) => {
+      if (s.pads[k] > 0) return;
+      const d = Math.hypot(px - mx, py - my);
+      if (d < pd && Math.hypot(px - gx, py - gy) < Math.hypot(P.x - gx, P.y - gy) + 200) { pd = d; pad = { x: px, y: py }; }
+    });
+  }
+
+  let tx, ty, avoid = true;
+  if (shadow || (pad && Math.hypot(P.x - mx, P.y - my) > 350)) {
+    const o = shadow || pad;
+    tx = o.x; ty = o.y;
+  } else if (defend) {
+    tx = defend.x; ty = defend.y;
+    // Touching the ball on the way is fine only if it sends it away from my goal.
+    avoid = (P.x - mx) * ux + (P.y - my) * uy > 0;
   } else if (back > 0.82 && Math.abs(side) < rs * 0.7) {
     // Lined up: drive through the ball toward the goal.
     tx = P.x + ax * 120; ty = P.y + ay * 120;
+    avoid = false;
   } else {
     const off = rs + 50;
     tx = P.x - ax * off; ty = P.y - ay * off;
@@ -406,6 +467,8 @@ function calcettoBot(s, me, g, B) {
       tx = P.x - ax * off * 0.4 + -ay * sg * (rs + 90);
       ty = P.y - ay * off * 0.4 + ax * sg * (rs + 90);
     }
+  }
+  if (avoid) {
     // Never drive through the ball on the way: pass it on my side.
     const sx = tx - mx, sy = ty - my, sl2 = sx * sx + sy * sy || 1;
     const u = clamp(((P.x - mx) * sx + (P.y - my) * sy) / sl2, 0, 1);
@@ -416,33 +479,33 @@ function calcettoBot(s, me, g, B) {
       if (nx * (mx - P.x) + ny * (my - P.y) < 0) { nx = -nx; ny = -ny; }
       tx = P.x + nx * (rs + 90); ty = P.y + ny * (rs + 90);
     }
-    tx = clamp(tx, L + c.r + 10, R - c.r - 10); ty = clamp(ty, T + c.r + 10, B - c.r - 10);
   }
+  tx = clamp(tx, L + c.r + 10, R - c.r - 10); ty = clamp(ty, T + c.r + 10, B - c.r - 10);
   let dx = tx - mx, dy = ty - my;
   const dl = Math.hypot(dx, dy) || 1;
   dx /= dl; dy /= dl;
   const heading = Math.atan2(dy, dx);
   const turn = Math.abs(angleDiff(c.a, heading));
   // Slow down for tight turns near the target so the cart does not orbit it.
-  const thr = dl < 160 && turn > 1.2 ? 0.45 : 1;
+  let thr = dl < 160 && turn > 1.2 ? 0.45 : 1;
+  // Slow reflexes: approach the ball gently so the cart does not overshoot it.
+  if (lv === 0 && !defend) thr = Math.min(thr, clamp(dl / 380, 0.4, 1));
   const want = { x: dx * thr, y: dy * thr };
 
   // Jump-kick: ball close, lined up toward the goal (or clearing it away from my goal).
   const dBall = Math.hypot(P.x - mx, P.y - my) - rs;
-  if (c.cd <= 0 && c.spin <= 0 && dBall < [90, 140, 170][lv]) {
+  if (c.cd <= 0 && c.spin <= 0 && dBall < [90, 180, 200][lv]) {
     const bx = (P.x - mx) / dP, by = (P.y - my) / dP;
-    const cosShot = bx * ax + by * ay;
     const clear = ballGoal < 520 && (bx * -ux + by * -uy) > 0.5; // kicks it away from my goal
-    if ((cosShot > [0.9, 0.93, 0.95][lv] && (aim.open || lv === 0)) || (lv > 0 && clear)) {
+    if (shotOnGoal(s, me, P.x, P.y, bx, by, [60, 0, -10][lv]) || (lv > 0 && clear)) {
       if (lv > 0 || B.rng() < 0.15) { want.x = bx; want.y = by; want.tapB = true; }
     }
   }
   // Gunpowder: long straight runs (and lined-up shots); the easy bot only on long runs.
   if (c.boost > 0.15 && turn < 0.35) {
     const lined = back > 0.85 && Math.abs(side) < rs * 0.6 && dBall < 450;
-    if (dl > (lv === 0 ? 650 : 380) || (lv > 0 && lined)) want.a = true;
+    if (dl > [650, 380, 260][lv] || (lv > 0 && lined) || (defend && lv > 0 && dl > 150)) want.a = true;
   }
-  mem.t = g.t;
   return want;
 }
 
