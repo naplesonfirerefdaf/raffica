@@ -194,8 +194,13 @@ export function makeKit({ world, cam = 'top', quality = 1, scene = new THREE.Sce
     const tex = K.canvasTex(wPx, hPx, null);
     const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, transparent: true, depthWrite: false, depthTest: o.depthTest ?? true }));
     sp.scale.set(size, (size * hPx) / wPx, 1);
+    let lastDraw = -1e9;
     sp.redraw = (...args) => {
       if (!tex) { if (K.mockDraw) draw(K.mockDraw, wPx, hPx, ...args); return; }
+      // At most 30 repaints/s: each one re-uploads the texture to the GPU.
+      const now = performance.now();
+      if (now - lastDraw < 33) return;
+      lastDraw = now;
       const ctx = tex.image.getContext('2d');
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, wPx, hPx);
@@ -310,9 +315,14 @@ export function makeKit({ world, cam = 'top', quality = 1, scene = new THREE.Sce
     const h0 = o.h ?? 0.8;
     return {
       mesh: me,
+      lastPaint: -1e9,
       at(x, y, h = h0) { K.place(me, x, y, side ? 0 : h); if (side) me.position.z = h; return this; },
       paint(fn) {
         if (!ctx) { if (K.mockDraw) fn(K.mockDraw); return this; }
+        // At most 30 repaints/s: each one re-uploads the texture to the GPU.
+        const now = performance.now();
+        if (now - this.lastPaint < 33) return this;
+        this.lastPaint = now;
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.clearRect(0, 0, px, px);
         const k = px / size;
@@ -1009,6 +1019,9 @@ export class Stage3D {
       this.renderer.shadowMap.enabled = !low;
       this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
       this.renderer.setClearColor(0x000000, 0);
+      // Shader error checks call getProgramInfoLog, which forces a synchronous wait for the driver's compile
+      // (100–400 ms freezes the first time an effect appears). Only useful while developing.
+      this.renderer.debug.checkShaderErrors = /[?&]shaderdebug/.test(typeof location !== 'undefined' ? location.search : '');
       this.ok = true;
     } catch (err) {
       console.warn('[3d] WebGL non disponibile, uso la grafica 2D', err);
@@ -1037,6 +1050,7 @@ export class Stage3D {
   }
 
   build(def, fields, r0) {
+    this.builds = (this.builds || 0) + 1; // diagnostics: must be 1 per game instance
     this.teardown();
     const quality = this.low ? 0 : 1;
     for (const field of fields) {
@@ -1054,21 +1068,38 @@ export class Stage3D {
   // Shader compilation on Windows/ANGLE can freeze a frame for 100–500 ms. Two rules make it happen only here:
   // 1) every material renders in the "transparent" variant forever (locked): games fade/blink things by
   //    toggling material.transparent, which would otherwise switch shader program mid-game;
-  // 2) all programs (hidden objects too) are compiled asynchronously right after build, behind the rule card.
+  // 2) right after build (behind the rule card) the whole scene is really DRAWN once into a tiny off-screen target
+  //    with every hidden object shown and culling off: on Windows/ANGLE that is what actually compiles + links the
+  //    shaders (shadow variants too) and uploads every texture, so nothing is left to do mid-game.
   warm() {
     const R = this.renderer;
-    const cam = new THREE.PerspectiveCamera(40, 1, 1, 50000);
     const t0 = performance.now();
+    const rt = new THREE.WebGLRenderTarget(64, 64);
     for (const st of this.stages.values()) {
       lockMaterials(st.scene);
-      const hidden = [];
-      st.scene.traverse((o) => { if (!o.visible) { hidden.push(o); o.visible = true; } });
-      st.scene.updateMatrixWorld(true);
+      const W = st.K.world;
+      const cam = new THREE.PerspectiveCamera(60, 1, 1, 1e6);
+      const c = st.K.p(W.w / 2, W.h / 2, 0);
+      if (st.K.side) cam.position.set(c.x, c.y, Math.max(W.w, W.h) * 2); else cam.position.set(c.x, Math.max(W.w, W.h) * 2, c.z + 1);
+      cam.lookAt(c);
+      const hidden = [], culled = [];
+      st.scene.traverse((o) => {
+        if (!o.visible) { hidden.push(o); o.visible = true; }
+        if (o.frustumCulled) { culled.push(o); o.frustumCulled = false; }
+      });
       try {
-        R.compile(st.scene, cam); // sync: programs are linked before the match starts (we are behind the rule card)
+        st.scene.updateMatrixWorld(true);
+        R.compile(st.scene, cam);
+        R.setRenderTarget(rt);
+        R.render(st.scene, cam);
       } catch (err) { console.warn('[3d] warm-up', err); }
-      for (const o of hidden) o.visible = false;
+      finally {
+        R.setRenderTarget(null);
+        for (const o of hidden) o.visible = false;
+        for (const o of culled) o.frustumCulled = true;
+      }
     }
+    rt.dispose();
     this.warmMs = Math.round(performance.now() - t0);
   }
 

@@ -223,9 +223,11 @@ export class Host {
       sc: this.score.slice(), tg: this.settings.target, rd: this.round,
       pl: this.players.map((p) => ({ n: p.n, on: p.on, rdy: p.rdy, c: p.c, bot: p.bot, tm: p.team })),
       tm: this.teamsOn(),
+      ts: !!this.settings.teams, // the setting itself (tm = actually active: 4 players split 2 + 2)
       seats: this.seats.slice(),
       g: c ? {
-        id: c.def.id, v: c.variant, m: c.mods, t: r3(c.t),
+        // k = serial number of this game instance (stable). st (start time) moves during hit-stops: never use it as an id.
+        id: c.def.id, k: c.no, v: c.variant, m: c.mods, t: r3(c.t),
         left: r3(Math.max(0, c.def.duration - c.t)), st: r3(c.startT), sw: c.inMods?.state.swapped || false,
         view: c.state ? c.def.view(c.state) : null,
       } : null,
@@ -394,7 +396,7 @@ export class Host {
     // Teams for the game (by SEAT): null in free-for-all. Games that support teams (def.teams) read g.teams / g.ally.
     const teams = this.teamsOn() && def.teams === true ? this.seats.map((s) => this.players[s].team) : null;
     const c = {
-      def, variant, mods, t: 0, startT: this.T, state: null, ended: false, winner: null, text: '',
+      def, variant, mods, t: 0, startT: this.T, state: null, ended: false, winner: null, text: '', no: (this.gameNo = (this.gameNo || 0) + 1),
       slow: [], hitstop: 0, replay, inMods: makeInputMods(mods, rng),
     };
     const host = this;

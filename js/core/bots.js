@@ -33,13 +33,23 @@ export function makeBotDriver(level, rng) {
   const q = [];
   let lastA = -9, lastB = -9, heldA = false, heldB = false, releaseA = false, releaseB = false;
   let noise = 0, lapseUntil = -1, lapseDir = { x: 0, y: 0 };
+  // Personality: two bots of the same level must never act in perfect sync (mirror matches look robotic).
+  // Each bot gets its own reaction speed, a slowly wandering extra delay and a habit of hesitating before a press.
+  const pers = 0.75 + rng() * 0.5;
+  const wobble = rng() * Math.PI * 2;
+  const hesitate = 0.25 + rng() * 0.35; // chance per frame of NOT pressing yet when a press is wanted
+  let pendA = false, pendB = false;
   return {
     level,
     mem: {},
     step(T, want) {
       q.push({ T, w: want || IDLE });
-      while (q.length > 1 && q[1].T <= T - L.delay) q.shift();
-      let w = q[0].T <= T - L.delay ? q[0].w : IDLE;
+      const delay = L.delay * pers * (1 + 0.3 * Math.sin(T * 0.9 + wobble)) + 0.02;
+      while (q.length > 1 && q[1].T <= T - delay) q.shift();
+      let w = q[0].T <= T - delay ? q[0].w : IDLE;
+      // Hesitation: a wanted tap waits a random few frames (holds stay immediate so movement is not sluggish).
+      if (w.tapA || pendA) { pendA = rng() < hesitate; if (pendA) w = { ...w, tapA: false }; }
+      if (w.tapB || pendB) { pendB = rng() < hesitate; if (pendB) w = { ...w, tapB: false }; }
       // Distraction: wander for a moment (easy bots).
       if (L.lapse && T > lapseUntil && rng() < L.lapse * (1 / 60)) {
         lapseUntil = T + L.lapseLen[0] + rng() * (L.lapseLen[1] - L.lapseLen[0]);

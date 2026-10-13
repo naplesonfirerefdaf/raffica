@@ -13,6 +13,7 @@ import { Renderer } from './render.js';
 import { interp } from './interp.js';
 import { audio } from './audio.js';
 import { UI } from './ui.js';
+import { TEAMS, teamOf } from './teams.js';
 
 // Public site (GitHub Pages) used in invitation links / QR codes of online rooms.
 const PUBLIC_URL = 'https://naplesonfirerefdaf.github.io/raffica/';
@@ -37,6 +38,7 @@ class App {
     this.isTouch = matchMedia('(pointer: coarse)').matches;
     this.settings = { ...DEFAULT_SETTINGS, shake: true, ...store.load('settings', {}) };
     this.settings.only = null;
+    this.settings.teams = false; // "Squadre 2 contro 2": chosen each time (not saved), see the toggle on Unisciti! / lobby
     this.audioSettings = { ...audio.settings, ...store.load('audio', {}) };
     // Music is off unless the player turns it on (v2 settings: older saves had it on by default).
     if (this.audioSettings.v !== 2) { this.audioSettings.music = 0; this.audioSettings.v = 2; }
@@ -123,10 +125,10 @@ class App {
 
   // ---------- sessions ----------
   // players: [{slot, name, char, bot?}] sitting at this device (bot = level id of a computer player).
-  startLocal({ players, only = null, target = null } = {}) {
+  startLocal({ players, only = null, target = null, teams = this.settings.teams } = {}) {
     if (!players || players.length < 2) { this.toast('Servono almeno 2 giocatori'); return false; }
     this.endSession();
-    const settings = { ...this.settings, only, target: target || this.settings.target };
+    const settings = { ...this.settings, only, target: target || this.settings.target, teams: !!teams };
     this.session = new LocalSession({ games: this.games, settings, players });
     const mode = this.localMode();
     this.mode = mode === 'shared' && players.length > 2 ? 'pc' : mode;
@@ -142,7 +144,8 @@ class App {
   joinedPlayers() {
     return SLOTS.filter((s) => this.joined[s].on).map((slot) => {
       const j = this.joined[slot];
-      return j.bot ? { slot, name: j.name, char: j.char, bot: j.bot } : { slot, name: this.names[slot], char: this.chars[slot] };
+      const team = j.tm === 1 ? 1 : 0;
+      return j.bot ? { slot, name: j.name, char: j.char, bot: j.bot, team } : { slot, name: this.names[slot], char: this.chars[slot], team };
     });
   }
 
@@ -163,11 +166,26 @@ class App {
     const freeChars = CHARACTERS.filter((c) => !chars.has(c.id));
     const pick = (l) => l[Math.floor(Math.random() * l.length)];
     this.joined[s] = {
-      on: true, rdy: true, bot: level,
+      on: true, rdy: true, bot: level, tm: this.freeTeam(s, 1),
       name: freeNames.length ? pick(freeNames) : `Bot ${s + 1}`,
       char: (freeChars.length ? pick(freeChars) : pick(CHARACTERS)).id,
     };
     this.ctl[s] = null;
+  }
+
+  // 2 vs 2: the team that needs players (place s excluded); on a tie `prefer` (bots: the Blu team, humans: by place).
+  freeTeam(s, prefer) {
+    const n = [0, 0];
+    SLOTS.forEach((q) => { if (q !== s && this.joined[q].on) n[this.joined[q].tm === 1 ? 1 : 0]++; });
+    return n[0] === n[1] ? prefer : n[0] < n[1] ? 0 : 1;
+  }
+
+  // 2 vs 2: a human in place s joins Rossa (places 1–2) or Blu (3–4), unless that team is already full.
+  humanTeam(s) {
+    const def = s < 2 ? 0 : 1;
+    const n = [0, 0];
+    SLOTS.forEach((q) => { if (q !== s && this.joined[q].on) n[this.joined[q].tm === 1 ? 1 : 0]++; });
+    return n[def] >= 2 ? 1 - def : def;
   }
 
   // ---------- network lobby bots (any player in the room may add/remove them) ----------
@@ -306,6 +324,8 @@ class App {
   }
 
   enterNet(role) {
+    // The room keeps its own "Squadre" choice (not in the snapshot until active): start from NO, the lobby toggle sends it.
+    if (this.session !== this.net) this.settings.teams = false;
     this.session = this.net;
     this.me = this.net.me ?? 0;
     this.setupNetCtl();
@@ -341,6 +361,24 @@ class App {
     if (this.session?.kind !== 'net' || this.session.me === null) return;
     const s = this.settings;
     this.session.cmd(this.session.me, { type: 'settings', settings: { target: s.target, crazy: s.crazy, variants: s.variants, loserPicks: s.loserPicks } });
+  }
+
+  // "Squadre 2 contro 2" is sent only when someone flips it (joining players must not switch it off for the room).
+  pushTeams() {
+    if (this.session?.kind !== 'net' || this.session.me === null) return;
+    this.session.cmd(this.session.me, { type: 'settings', settings: { teams: !!this.settings.teams } });
+  }
+
+  // Network lobby: team of a place (own place, or a bot via target).
+  setNetTeam(slot, team) {
+    const s = this.session;
+    if (s?.kind !== 'net' || !s.local.length) return;
+    const pl = s.sample?.()?.latest?.pl?.[slot];
+    if (!pl?.on) return;
+    if (s.local.includes(slot)) s.cmd(slot, { type: 'team', team });
+    else if (pl.bot) s.cmd(s.local[0], { type: 'team', target: slot, team });
+    else return;
+    this.sound('tick');
   }
 
   // Change the character of a local player (lobby / "Unisciti!").
@@ -391,6 +429,7 @@ class App {
       // Developer shortcut: ?dev=<gameId>&v=<variant>&m=<mod>&n=<0..4>&bots=<level,level…>&layout=shared|pc
       // Players 1–2 use the two keyboard sets (F / K = ready), the others stand still and are auto-ready.
       // bots = computer players in the places after the humans (e.g. &n=1&bots=difficile, &n=0&bots=facile,difficile).
+      // teams=1 = 2 vs 2 (places 1–2 Rossa, 3–4 Blu), e.g. ?dev=soule&n=2&bots=medio,medio&teams=1.
       if (q.get('layout')) this.layoutPref = q.get('layout');
       const bots = (q.get('bots') || '').split(',').map((b) => b.trim()).filter((b) => BOT_LEVELS.some((l) => l.id === b));
       const nq = q.has('n') ? Number(q.get('n')) : NaN;
@@ -407,7 +446,9 @@ class App {
       this.ctl = SLOTS.map((i) => (i < 2 ? { kb: [i], pads: [] } : null));
       this.autoPads = true;
       this.devIdle = true;
-      this.startLocal({ players, only: [dev], target: 3 });
+      const teams = /^(1|true|si|sì)$/i.test(q.get('teams') || '');
+      if (teams) players.forEach((p) => { p.team = p.slot < 2 ? 0 : 1; });
+      this.startLocal({ players, only: [dev], target: 3, teams });
       const m = q.get('m');
       this.session.cmd(0, { type: 'debug', id: dev, v: q.get('v'), m: m && MOD_BY_ID[m] ? [m] : [] });
     }
@@ -621,12 +662,13 @@ class App {
     if (ph === 'result') {
       const w = snap.x?.w;
       if (Number.isInteger(w) && w >= 0) {
-        // One player here: their own win/loss. Several players on this screen: always a party.
-        const mine = this.session.local.length === 1 ? w === this.me : true;
+        // One player here: their own win/loss (2 vs 2: their team's). Several players on this screen: always a party.
+        const team = snap.tm ? teamOf(snap.pl?.[w]) : null;
+        const mine = this.session.local.length === 1 ? (team !== null ? teamOf(snap.pl?.[this.me]) === team : w === this.me) : true;
         audio.sfx(mine ? 'win' : 'lose');
         audio.crowd(mine ? 'cheer' : 'aww');
-        const name = snap.pl?.[w]?.n || this.names[w];
-        audio.say(snap.x.matchPoint === w ? `Punto a ${name}. Match point!` : `Punto a ${name}!`);
+        const name = team !== null ? `alla squadra ${TEAMS[team].name}` : `a ${snap.pl?.[w]?.n || this.names[w]}`;
+        audio.say(snap.x.matchPoint === w ? `Punto ${name}. Match point!` : `Punto ${name}!`);
         this.renderer.fx.confetti(this.renderer.W / 2, this.renderer.H * 0.4, 50);
       } else {
         audio.crowd('ooh');
@@ -637,8 +679,8 @@ class App {
       audio.music('final');
       audio.crowd('cheer');
       const w = snap.x?.w;
-      const name = snap.pl?.[w]?.n || this.names[w] || '';
-      audio.say(`${name} è il campione di Raffica!`);
+      if (snap.tm) audio.say(`La squadra ${TEAMS[teamOf(snap.pl?.[w])].name} è campione di Raffica!`);
+      else audio.say(`${snap.pl?.[w]?.n || this.names[w] || ''} è il campione di Raffica!`);
     }
     void prev;
   }
@@ -700,7 +742,7 @@ class App {
     const def = snap.g ? this.byId.get(snap.g.id) : null;
     let gview = snap.g?.view || null;
     const a = smp.a;
-    if (gview && a?.g && a.g.id === snap.g.id && a.g.st === snap.g.st && a.g.view && smp.t < 1) {
+    if (gview && a?.g && a.g.id === snap.g.id && (a.g.k ?? a.g.st) === (snap.g.k ?? snap.g.st) && a.g.view && smp.t < 1) {
       try { gview = interp(a.g.view, snap.g.view, smp.t); } catch { gview = snap.g.view; }
     }
     // Roulette ticks.

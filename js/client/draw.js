@@ -16,10 +16,12 @@ export function makeDraw(ctx) {
     quality: 1,     // 0 = low (no blur glow), 1 = high
     seats: null,    // seat -> slot of the running game (team colors follow the slot); set by the renderer
     chars: null,    // slot -> character id (snapshot pl[slot].c); set by the renderer
+    cmap: null,     // slot -> PLAYER_COLORS index (team colors in a 2 vs 2 match); null = the slot's own color
   };
   // Games talk in seats (player 0..n-1); colors belong to the slot that seat is sitting in.
   const slotOf = (p) => { const s = d.seats?.[p]; return Number.isInteger(s) ? s : p; };
   d.slotOf = slotOf;
+  const colOf = (slot) => { const c = d.cmap?.[slot]; return Number.isInteger(c) ? c : slot; };
 
   const fillStroke = (fill, stroke, lw) => {
     if (fill) { ctx.fillStyle = fill; ctx.fill(); }
@@ -128,7 +130,7 @@ export function makeDraw(ctx) {
     ctx.restore();
   };
   d.neon = (fn, color = '#fff') => d.glow(color, 14, fn);
-  d.col = (p, shade = 'main') => (SHADES[slotOf(p)] || SHADES[0])[shade] || SHADES[0].main;
+  d.col = (p, shade = 'main') => (SHADES[colOf(slotOf(p))] || SHADES[0])[shade] || SHADES[0].main;
   d.grid = (step, color = 'rgba(255,255,255,0.05)', w = 4000, h = 4000) => {
     ctx.beginPath();
     for (let x = -w; x <= w; x += step) { ctx.moveTo(x, -h); ctx.lineTo(x, h); }
@@ -203,6 +205,9 @@ function drawAvatar(d, x, y, r, p, o) {
   p = p >= 0 && p < SHADES.length ? p | 0 : 0;
   // Medieval portrait of the player's character; the blob is only the last-resort fallback.
   const ch = CHAR_BY_ID[d.chars?.[p]] || CHAR_BY_ID[DEFAULT_CHARS[p]];
+  // The character belongs to the slot, the color may be the team's (2 vs 2).
+  const ci = d.cmap?.[p];
+  if (Number.isInteger(ci) && ci >= 0 && ci < SHADES.length) p = ci;
   if (ch && !o.blob) { drawPortrait(d, x, y, r, p, ch, o); return; }
   const cache = avatarCache(d);
   const sh = SHADES[p];

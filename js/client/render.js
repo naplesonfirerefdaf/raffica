@@ -8,8 +8,12 @@ import { drawTouch } from './input.js';
 import { PLAYER_COLORS, CHAR_BY_ID, DEFAULT_CHARS } from '../core/proto.js';
 import { BOT_LEVELS } from '../core/bots.js';
 import { MOD_BY_ID } from '../core/mods.js';
+import { TEAMS, snapColorMap, members, teamOf, teamScore } from './teams.js';
 
-const C = PLAYER_COLORS;
+// C[slot] = color of a slot: its own color, or its team color in a 2 vs 2 match (set every frame).
+// PC = the 4 fixed colors for decorations (hall banners, rose window, crest).
+const PC = PLAYER_COLORS;
+let C = PLAYER_COLORS;
 const TAU = Math.PI * 2;
 const GOLD = '#f6c94e';
 const GOLD_HI = '#fff2b3';
@@ -83,7 +87,13 @@ export class Renderer {
     this.d.seats = this.seats;
     this.d.chars = s?.pl ? s.pl.map((q) => q?.c) : null;
     this.fx.seats = this.seats;
-    const key = s?.g ? `${s.g.id}:${s.g.st}` : null;
+    // 2 vs 2: every player wears a color of its team (red + gold / blue + green).
+    this.cmap = snapColorMap(s);
+    C = this.cmap.map((k) => PC[k] || PC[0]);
+    this.d.cmap = this.cmap;
+    this.fx.cmap = this.cmap;
+    // One key per game instance: a new key rebuilds the whole 3D scene and clears the effects.
+    const key = s?.g ? `${s.g.id}:${s.g.k ?? s.g.st}` : null;
     if (key !== this.gameKey) { this.gameKey = key; this.fx.clearWorld(); }
     const ph = s?.ph || null;
     if (ph !== this.phase) { this.prevPhase = this.phase; this.phase = ph; this.phaseAt = f.now; }
@@ -493,7 +503,7 @@ export class Renderer {
     // Torch flames.
     for (const [i, tc] of L.torches.entries()) flame(ctx, tc.x, tc.y - U * 1.1, U * 5.2, t, i * 1.7);
     // Waving team banners.
-    for (const b of L.banners) clothBanner(ctx, b.x, H * 0.045 + 3, L.bw, L.bl, C[b.k], t, b.k * 1.3, b.k);
+    for (const b of L.banners) clothBanner(ctx, b.x, H * 0.045 + 3, L.bw, L.bl, PC[b.k], t, b.k * 1.3, b.k);
     ctx.restore();
   }
 
@@ -509,7 +519,9 @@ export class Renderer {
     const seats = this.seats, pl = snap.pl || [];
     const rBase = {
       field: null, viewer: null, T: gt, n: seats.length,
-      roster: seats.map((s) => ({ char: pl[s]?.c || DEFAULT_CHARS[s], color: s })),
+      roster: seats.map((s) => ({ char: pl[s]?.c || DEFAULT_CHARS[s], color: this.cmap?.[s] ?? s })),
+      // Team of each seat in a team match of a team game (same as g.teams in the simulation), else null.
+      teams: snap.tm && def.teams === true ? seats.map((s) => (pl[s]?.tm === 1 ? 1 : 0)) : null,
       colors: seats.map((s) => C[s].main),
       names: seats.map((s) => pl[s]?.n || f.names?.[s] || `Giocatore ${s + 1}`),
       variant: snap.g.v, mods: modFlagsClient(mods), ended: snap.ph === 'finish' || snap.ph === 'result',
@@ -766,7 +778,10 @@ export class Renderer {
     ctx.restore();
     const seats = this.seats, n = seats.length;
     const fs = Math.round(h * 0.42);
-    const centerW = fs * 5.2;
+    // 2 vs 2: Red team on the left, Blue team on the right, team scores next to the timer.
+    const teams = !!s.tm && n === 4;
+    const order = teams ? [0, 1].flatMap((t) => seats.map((sl, k) => (teamOf(s.pl?.[sl]) === t ? k : -1)).filter((k) => k >= 0)) : seats.map((_, k) => k);
+    const centerW = fs * (teams ? 9.4 : 5.2);
     const nl = Math.ceil(n / 2), nr = n - nl;
     const cells = [];
     const lw = (W - centerW) / 2;
@@ -777,7 +792,7 @@ export class Renderer {
     }
     // Team cloth hanging behind each plate.
     cells.forEach((c, k) => {
-      const col = C[seats[k]].main;
+      const col = C[seats[order[k]]].main;
       const right = c.align === 'right';
       const x0 = right ? c.x1 : c.x0, dir = right ? -1 : 1, pw = (c.x1 - c.x0) * (n === 2 ? 1 : 0.92);
       const pg = ctx.createLinearGradient(x0, 0, x0 + dir * pw, 0);
@@ -802,7 +817,7 @@ export class Renderer {
     ctx.fillStyle = gg;
     ctx.fillRect(0, h - 5, W, 2);
     const eg = ctx.createLinearGradient(0, 0, W, 0);
-    seats.forEach((sl, k) => eg.addColorStop(n === 1 ? 0 : k / (n - 1), C[sl].main));
+    order.forEach((q, k) => eg.addColorStop(n === 1 ? 0 : k / (n - 1), C[seats[q]].main));
     ctx.fillStyle = eg;
     ctx.fillRect(0, h - 2.5, W, 2.5);
     const sg = ctx.createLinearGradient(0, h, 0, h + 10);
@@ -811,8 +826,22 @@ export class Renderer {
     ctx.fillStyle = sg;
     ctx.fillRect(0, h, W, 10);
     if (h > 30) for (const x of [7, W - 7]) rivet(ctx, x, h / 2, Math.min(4, h * 0.09));
-    cells.forEach((c, k) => this.hudPlate(f, k, c.x0, c.x1, c.align, h, fs));
+    if (teams) {
+      // A team pennant behind each half of the bar.
+      for (const t of [0, 1]) {
+        const x0 = t ? W - lw : 0, x1 = t ? W : lw;
+        const tg = ctx.createLinearGradient(0, 0, 0, h);
+        tg.addColorStop(0, TEAMS[t].main + '55');
+        tg.addColorStop(1, TEAMS[t].dark + '20');
+        ctx.fillStyle = tg;
+        ctx.fillRect(x0, 0, x1 - x0, h - 5);
+        ctx.fillStyle = TEAMS[t].main;
+        ctx.fillRect(t ? x0 : x1 - 3, h * 0.08, 3, h * 0.8);
+      }
+    }
+    cells.forEach((c, k) => this.hudPlate(f, order[k], c.x0, c.x1, c.align, h, fs));
     this.hudCenter(f, W / 2, h / 2, fs);
+    if (teams) for (const t of [0, 1]) teamShield(ctx, W / 2 + (t ? 1 : -1) * fs * 3.55, h / 2 + 1, fs * 1.02, t, teamScore(s, t), s.ph === 'result' && s.x?.team === t);
   }
 
   hudPlate(f, seat, x0, x1, align, h, fs) {
@@ -1413,14 +1442,18 @@ export class Renderer {
     const wnr = x.w; // slot
     const has = Number.isInteger(wnr) && wnr >= 0 && !!C[wnr];
     const seats = this.seats, n = seats.length;
+    // 2 vs 2: the whole team wins (x.team), the banner takes the team color.
+    const team = s.tm && n === 4 ? (x.team === 0 || x.team === 1 ? x.team : has ? teamOf(s.pl?.[wnr]) : null) : null;
+    const winSet = team !== null && has ? new Set(members(s, team)) : new Set(has ? [wnr] : []);
     const bh = Math.min(h * 0.36, 260);
     const pw = Math.min(w * 0.92, 900);
-    sunburst(ctx, w / 2, h * 0.45, Math.hypot(w, h) * 0.7, 16, s.pt * 0.3, has ? C[wnr].main : '#aaa', 0.12 * Math.min(1, s.pt * 3));
+    const TC = team !== null && has ? TEAMS[team] : has ? C[wnr] : null;
+    sunburst(ctx, w / 2, h * 0.45, Math.hypot(w, h) * 0.7, 16, s.pt * 0.3, TC ? TC.main : '#aaa', 0.12 * Math.min(1, s.pt * 3));
     ctx.save();
     ctx.translate(w / 2, h * 0.45);
     ctx.scale(k, k);
     ctx.rotate((1 - Math.min(1, s.pt / 0.35)) * 0.1);
-    const main = has ? C[wnr].main : '#8a7a6a', dark = has ? C[wnr].dark : '#3a2e24';
+    const main = TC ? TC.main : '#8a7a6a', dark = TC ? TC.dark : '#3a2e24';
     // Swallow-tailed ribbon ends (only when there is room on the sides).
     if (w * 0.98 > pw + bh * 0.3) {
       for (const sd of [-1, 1]) {
@@ -1469,26 +1502,38 @@ export class Renderer {
     // Title for whoever looks: own device -> HAI VINTO / HAI PERSO, shared screen -> VINCE <name>.
     let title;
     if (has) {
-      const name = s.pl?.[wnr]?.n || f.names[wnr];
+      const name = team !== null ? `LA SQUADRA ${TEAMS[team].name.toUpperCase()}` : s.pl?.[wnr]?.n || f.names[wnr];
       const vs = this.viewerSlot(f, o);
-      title = vs === null || !seats.includes(vs) ? `VINCE ${name.toUpperCase()}!` : vs === wnr ? 'HAI VINTO!' : 'HAI PERSO!';
+      title = vs === null || !seats.includes(vs) ? `VINCE ${name.toUpperCase()}!` : winSet.has(vs) ? 'HAI VINTO!' : 'HAI PERSO!';
     } else title = x.replay ? 'PAREGGIO! SI RIGIOCA IN TURBO!' : 'PAREGGIO!';
     outlined(ctx, title, 0, -bh * 0.22, Math.min(bh * 0.24, (Math.min(w, pw * 1.05) * 1.25) / Math.max(8, title.length)), '#fff', 'center', 900, { depth: 0.08, font: TITLE_FONT });
     if (x.text) text(ctx, x.text, 0, bh * 0.03, Math.min(bh * 0.12, (pw * 1.4) / Math.max(10, x.text.length)), '#fff6e0', 'center', 700, true);
     // Scores of every seated player, in seat order (team colors).
     const sc = x.sc || s.sc || [];
     const r = bh * 0.17 * (n > 2 ? 0.85 : 1);
-    const gap = n === 2 ? Math.min(w * 0.12, pw * 0.14) * 2 : Math.min(pw * 0.8 / n, r * 3.4);
-    seats.forEach((p, i) => {
-      const pulse = p === wnr ? 1 + 0.06 * Math.sin(s.pt * 9) : 1;
-      scoreChip(ctx, `${sc[p] ?? 0}`, (i - (n - 1) / 2) * gap, bh * 0.29, r * pulse, p);
-    });
-    if (n === 2) text(ctx, '–', 0, bh * 0.28, bh * 0.2, '#fff', 'center', 900, true);
+    if (s.tm && n === 4) {
+      // Team score: two shields, "Rossi 3 – 2 Blu".
+      const gap = Math.min(w * 0.12, pw * 0.14) * 2;
+      for (const t of [0, 1]) {
+        const pulse = t === team ? 1 + 0.06 * Math.sin(s.pt * 9) : 1;
+        teamShield(ctx, (t ? 1 : -1) * gap / 2, bh * 0.28, bh * 0.15 * pulse, t, teamScore(s, t, sc), t === team);
+      }
+      text(ctx, '–', 0, bh * 0.28, bh * 0.2, '#fff', 'center', 900, true);
+    } else {
+      const gap = n === 2 ? Math.min(w * 0.12, pw * 0.14) * 2 : Math.min(pw * 0.8 / n, r * 3.4);
+      seats.forEach((p, i) => {
+        const pulse = p === wnr ? 1 + 0.06 * Math.sin(s.pt * 9) : 1;
+        scoreChip(ctx, `${sc[p] ?? 0}`, (i - (n - 1) / 2) * gap, bh * 0.29, r * pulse, p);
+      });
+      if (n === 2) text(ctx, '–', 0, bh * 0.28, bh * 0.2, '#fff', 'center', 900, true);
+    }
     // The blobs react along the top edge of the banner.
     d.textRot = 0; d.px = 1; d.t = s.pt;
     const ar = bh * (n > 2 ? 0.16 : 0.2);
-    seats.forEach((p, i) => {
-      const win = p === wnr;
+    // Team match: the Red pair on the left, the Blue pair on the right.
+    const shown = s.tm && n === 4 ? [...members(s, 0), ...members(s, 1)] : seats;
+    shown.forEach((p, i) => {
+      const win = winSet.has(p);
       const ax = n === 2 ? (i ? 1 : -1) * (pw / 2 - ar * 1.5) : -pw / 2 + ar * 1.6 + (i * (pw - ar * 3.2)) / (n - 1);
       const hop = win ? Math.abs(Math.sin(s.pt * 7)) * ar * 0.5 : 0;
       d.avatarSlot(ax, -bh / 2 - ar * 0.55 - hop, ar, p, { mood: has ? (win ? 'happy' : 'hurt') : 'dizzy', look: Math.PI / 2, squash: win ? Math.sin(s.pt * 14) * 0.06 : 0, hat: win ? 'crown' : null });
@@ -1523,6 +1568,7 @@ export class Renderer {
     const s = f.snap, x = s.x || {};
     const wnr = x.w;
     if (!(Number.isInteger(wnr) && wnr >= 0 && C[wnr])) return;
+    if (s.tm && this.seats.length === 4) return this.finalTeamOverlay(f, o, w, h);
     dim(ctx, w, h, 0.35);
     const t = s.pt;
     const U = Math.min(h, w * 1.2) / 100;
@@ -1609,6 +1655,122 @@ export class Renderer {
     });
     // Awards on little parchment scrolls.
     (x.awards || []).forEach((a, k) => {
+      const y = baseY + U * 10.5 + k * U * 6.8;
+      const appear = easeBack((t - 0.9 - k * 0.25) / 0.35);
+      if (appear <= 0.01 || !C[a.p]) return;
+      const who = s.pl?.[a.p]?.n || f.names[a.p];
+      const label = `${a.icon} ${a.name} — ${who}`;
+      const cw = Math.min(w * 0.9, U * 80), chh = U * 6.2;
+      ctx.save();
+      ctx.translate(w / 2, y + U * 1.2);
+      ctx.scale(appear, appear);
+      parchment(ctx, -cw / 2, -chh / 2, cw, chh, U * 0.8, { lw: 2 });
+      ctx.fillStyle = C[a.p].main;
+      roundRect(ctx, -cw / 2 + 5, -chh / 2 + 5, Math.max(4, U * 1.1), chh - 10, U * 0.4); ctx.fill();
+      ctx.translate(-w / 2, -y - U * 1.2);
+      text(ctx, label, w / 2, y - U * 0.1, Math.min(U * 3.1, (w * 1.6) / Math.max(10, label.length)), C[a.p].dark, 'center', 800);
+      text(ctx, a.desc, w / 2, y + U * 2.6, Math.min(U * 2.4, (w * 1.6) / Math.max(10, a.desc.length)), PARCH_INK, 'center', 600);
+      ctx.restore();
+    });
+    const blink = 0.75 + 0.25 * Math.sin(t * 5);
+    ctx.globalAlpha = blink;
+    hintLine(ctx, [{ b: 'A' }, 'RIVINCITA', '   ·   ', { b: 'B' }, 'MENU'], w / 2, h * 0.955, Math.min(U * 3.6, w * 0.045));
+    ctx.globalAlpha = 1;
+    if (Math.random() < 0.15) this.fx.confetti(Math.random() * this.W, -10, 4);
+  }
+
+  // 2 vs 2 final: the champion team on the high step (both members crowned), the other team on the low one.
+  finalTeamOverlay(f, o, w, h) {
+    const { ctx, d } = this;
+    const s = f.snap, x = s.x || {};
+    const t = s.pt;
+    const U = Math.min(h, w * 1.2) / 100;
+    const sc = x.sc || s.sc || [];
+    const win = teamOf(s.pl?.[x.w]), lose = 1 - win;
+    const TW = TEAMS[win];
+    dim(ctx, w, h, 0.35);
+    sunburst(ctx, w / 2, h * 0.36, Math.hypot(w, h) * 0.8, 20, t * 0.25, TW.main, 0.13);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const sg = ctx.createLinearGradient(0, 0, 0, h * 0.5);
+    sg.addColorStop(0, 'rgba(255,220,150,0.0)');
+    sg.addColorStop(1, 'rgba(255,220,150,0.2)');
+    ctx.fillStyle = sg;
+    ctx.beginPath();
+    ctx.moveTo(w / 2 - U * 6, 0);
+    ctx.lineTo(w / 2 + U * 6, 0);
+    ctx.lineTo(w / 2 + U * 22, h * 0.5);
+    ctx.lineTo(w / 2 - U * 22, h * 0.5);
+    ctx.closePath();
+    ctx.fill();
+    ctx.restore();
+    const ttl = '👑 CAMPIONI DEL REAME 👑';
+    const ts = Math.min(U * 4.8, (w * 0.8) / Math.max(10, ttl.length * 0.72));
+    ribbon(ctx, w / 2, h * 0.075, Math.min(w * 0.92, measure(ctx, ttl, ts, 900, TITLE_FONT) + ts * 2.2), ts * 1.75, '#e0a52a', '#8a5a0a');
+    outlined(ctx, ttl, w / 2, h * 0.075, ts, '#fff', 'center', 900, { depth: 0.07, font: TITLE_FONT });
+    const name = `SQUADRA ${TW.name.toUpperCase()}`;
+    const ng = ctx.createLinearGradient(0, h * 0.17 - U * 4, 0, h * 0.17 + U * 4);
+    ng.addColorStop(0, '#fff');
+    ng.addColorStop(0.5, TW.light);
+    ng.addColorStop(1, TW.main);
+    outlined(ctx, name, w / 2, h * 0.165, Math.min(U * 7, (w * 1.3) / Math.max(5, name.length)), ng, 'center', 900, { depth: 0.08, font: TITLE_FONT });
+    const wm = members(s, win), lm = members(s, lose);
+    const pair = wm.map((q) => s.pl?.[q]?.n || f.names[q] || '').join(' & ');
+    text(ctx, pair, w / 2, h * 0.165 + U * 5.2, Math.min(U * 3, (w * 1.4) / Math.max(8, pair.length)), '#fff2d2', 'center', 700, true);
+    // Two wide steps: champions (left, high) and the other team (right, low).
+    const colW = Math.min(w * 0.36, U * 38);
+    const baseY = h * 0.66;
+    const steps = [{ team: win, slots: wm, ph: U * 15, rk: 0 }, { team: lose, slots: lm, ph: U * 8, rk: 1 }];
+    d.textRot = 0; d.px = 1; d.t = t;
+    steps.forEach((st, i) => {
+      const T = TEAMS[st.team];
+      const cx = w / 2 + (i ? 1 : -1) * colW * 0.54;
+      const top = baseY - st.ph;
+      const appear = easeBack((t - 0.15 - st.rk * 0.18) / 0.4);
+      if (appear <= 0.01) return;
+      ctx.save();
+      ctx.translate(cx, baseY);
+      ctx.scale(1, appear);
+      ctx.translate(-cx, -baseY);
+      stoneBlock(ctx, cx - colW / 2, top, colW, st.ph, U);
+      // Team banner on the front of the step, with the team score.
+      const bw = colW * 0.3, bl = st.ph * 0.9;
+      const bg = ctx.createLinearGradient(0, top, 0, top + bl);
+      bg.addColorStop(0, T.main);
+      bg.addColorStop(1, T.dark);
+      ctx.beginPath();
+      ctx.moveTo(cx - bw / 2, top + U * 0.5);
+      ctx.lineTo(cx + bw / 2, top + U * 0.5);
+      ctx.lineTo(cx + bw / 2, top + bl);
+      ctx.lineTo(cx, top + bl - Math.min(bw * 0.35, bl * 0.25));
+      ctx.lineTo(cx - bw / 2, top + bl);
+      ctx.closePath();
+      ctx.fillStyle = bg;
+      ctx.fill();
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = GOLD;
+      ctx.stroke();
+      ctx.fillStyle = GOLD;
+      ctx.fillRect(cx - bw / 2 - U * 0.6, top + U * 0.2, bw + U * 1.2, Math.max(2, U * 0.7));
+      outlined(ctx, `${st.rk + 1}`, cx, top + bl * 0.42, Math.min(bl * 0.45, bw * 0.6), st.rk === 0 ? GOLD_HI : '#fff', 'center', 900, { depth: 0.06, font: TITLE_FONT });
+      ctx.restore();
+      if (appear < 0.6) return;
+      const ar = st.rk === 0 ? U * 6.2 : U * 5;
+      st.slots.forEach((slot, k) => {
+        const ax = cx + (k ? 1 : -1) * colW * 0.27;
+        const bounce = st.rk === 0 ? Math.abs(Math.sin(t * 4 + k * 1.3)) * U * 2 : 0;
+        d.avatarSlot(ax, top - ar - bounce, ar, slot, {
+          mood: st.rk === 0 ? 'happy' : 'dizzy', look: Math.PI / 2,
+          squash: st.rk === 0 ? Math.sin(t * 8 + k) * 0.06 : 0, hat: st.rk === 0 ? 'crown' : null,
+        });
+        botMark(ctx, ax + ar * 0.85, top - ar * 0.45 - bounce, ar * 0.36, s.pl?.[slot]?.bot);
+        const nm = s.pl?.[slot]?.n || f.names[slot] || '';
+        text(ctx, nm, ax, baseY + U * 2.6, Math.min(U * 3, (colW * 0.85) / Math.max(6, nm.length * 0.55)), C[slot].light, 'center', 800, true);
+      });
+      const pts = teamScore(s, st.team, sc);
+      text(ctx, `Squadra ${T.name} · ${pts} ${pts === 1 ? 'punto' : 'punti'}`, cx, baseY + U * 5.4, U * 2.3, '#f6e6c4', 'center', 700, true);
+    });
+    (x.awards || []).slice(0, 2).forEach((a, k) => {
       const y = baseY + U * 10.5 + k * U * 6.8;
       const appear = easeBack((t - 0.9 - k * 0.25) / 0.35);
       if (appear <= 0.01 || !C[a.p]) return;
@@ -2140,7 +2302,7 @@ function joyIcon(ctx, x, y, r) {
   ctx.lineCap = 'butt';
   ctx.beginPath();
   ctx.arc(x + r * 0.18, y - r * 0.45, r * 0.42, 0, TAU);
-  ctx.fillStyle = C[0].main;
+  ctx.fillStyle = PC[0].main;
   ctx.fill();
   ctx.lineWidth = Math.max(1.5, r * 0.12);
   ctx.strokeStyle = INK;
@@ -2385,7 +2547,7 @@ function roseWindow(g, cx, cy, r) {
     g.moveTo(cx, cy);
     g.arc(cx, cy, r * 0.92, a0 + 0.05, a1 - 0.05);
     g.closePath();
-    const col = C[k % 4];
+    const col = PC[k % 4];
     const pg = g.createRadialGradient(cx, cy, r * 0.2, cx, cy, r);
     pg.addColorStop(0, col.light);
     pg.addColorStop(0.65, col.main);
@@ -2453,6 +2615,33 @@ function shieldPath(ctx, x, y, w, h) {
   ctx.closePath();
 }
 
+// Team score on a heraldic shield in the team color (2 vs 2 HUD). glow = the team just scored.
+function teamShield(ctx, x, y, R, t, score, glow = false) {
+  const T = TEAMS[t];
+  const w = R * 1.5, h = R * 1.8;
+  ctx.save();
+  shieldPath(ctx, x, y + h * 0.06, w, h);
+  ctx.fillStyle = 'rgba(0,0,0,0.5)';
+  ctx.fill();
+  if (glow) { ctx.shadowColor = GOLD; ctx.shadowBlur = R * 0.8; }
+  shieldPath(ctx, x, y, w, h);
+  const g = ctx.createLinearGradient(x - w / 2, y - h / 2, x + w / 2, y + h / 2);
+  g.addColorStop(0, T.light);
+  g.addColorStop(0.45, T.main);
+  g.addColorStop(1, T.dark);
+  ctx.fillStyle = g;
+  ctx.fill();
+  ctx.shadowBlur = 0;
+  ctx.lineWidth = Math.max(2, R * 0.13);
+  ctx.strokeStyle = glow ? GOLD_HI : GOLD;
+  ctx.stroke();
+  ctx.lineWidth = Math.max(1, R * 0.05);
+  ctx.strokeStyle = INK;
+  ctx.stroke();
+  outlined(ctx, String(score), x, y - h * 0.04, R * 1.05, '#fff', 'center', 800, { depth: 0, lw: 0.2 });
+  ctx.restore();
+}
+
 // The RAFFICA! crest: a shield quartered in the 4 team colors with a golden cross.
 function crest(ctx, x, y, h) {
   const w = h * 0.82;
@@ -2465,7 +2654,7 @@ function crest(ctx, x, y, h) {
   ctx.clip();
   const t = y - h / 2;
   const q = [[x - w / 2, t, 0], [x, t, 1], [x - w / 2, y, 2], [x, y, 3]];
-  for (const [qx, qy, k] of q) { ctx.fillStyle = C[k].main; ctx.fillRect(qx, qy, w / 2, h / 2 + h * 0.02); }
+  for (const [qx, qy, k] of q) { ctx.fillStyle = PC[k].main; ctx.fillRect(qx, qy, w / 2, h / 2 + h * 0.02); }
   const sh = ctx.createLinearGradient(x - w / 2, 0, x + w / 2, 0);
   sh.addColorStop(0, 'rgba(255,255,255,0.25)');
   sh.addColorStop(0.5, 'rgba(255,255,255,0)');

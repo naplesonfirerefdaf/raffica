@@ -41,7 +41,7 @@ class SnapBuffer {
 }
 
 export class LocalSession {
-  // players: [{slot, name, char, bot?}] — every player sitting at this device (2–4); bot = level id for computer players.
+  // players: [{slot, name, char, bot?, team?}] — every player sitting at this device (2–4); bot = level id for computer players.
   // Bots run inside the Host: they are not in `local` (this device sends no input for them).
   constructor({ games, settings, players }) {
     this.kind = 'local';
@@ -51,6 +51,8 @@ export class LocalSession {
     this.host = new Host({ games, seed: (Math.random() * 2 ** 32) >>> 0, settings });
     for (const p of players) if (!p.bot) this.host.setPlayer(p.slot, { name: p.name, char: p.char, connected: true });
     for (const p of players.filter((q) => q.bot).sort((a, b) => a.slot - b.slot)) this.addBotAt(p.slot, p.bot, p.char, p.name);
+    // 2 vs 2: team of every place (0 = Rossa, 1 = Blu); without it the Host default applies (places 1–2 vs 3–4).
+    for (const p of players) if (p.team === 0 || p.team === 1) this.host.command(p.slot, { type: 'team', target: p.slot, team: p.team });
     this.buf = new SnapBuffer();
     this.acc = 0;
     this.last = performance.now();

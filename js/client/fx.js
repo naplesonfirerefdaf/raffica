@@ -60,13 +60,15 @@ export class Fx {
     this.flashColor = '#fff';
     this.seed = 1;
     this.seats = null; // seat -> slot of the running game: effect colors follow the team (slot) color
+    this.cmap = null;  // slot -> PLAYER_COLORS index (2 vs 2: team colors)
   }
 
   // Effects name a SEAT in `player`; the color is the one of the slot sitting there.
   colorOf(o, fallback = '#fff') {
     if (Number.isInteger(o.player) && o.player >= 0) {
       const slot = this.seats?.[o.player] ?? o.player;
-      if (PLAYER_COLORS[slot]) return PLAYER_COLORS[slot].main;
+      const ci = this.cmap?.[slot] ?? slot;
+      if (PLAYER_COLORS[ci]) return PLAYER_COLORS[ci].main;
     }
     return o.color || fallback;
   }
