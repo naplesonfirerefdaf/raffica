@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="it">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAFFICA! Lab 3D</title>
+<!-- Dev page: preview the 3D kit (characters, models, themes, textures). ?theme=notte&chars=knight,mage,skwarrior,hooded&anim=Cheer&models=medieval/building_castle_red,... -->
+<script type="importmap">{ "imports": { "three": "./vendor/three.module.min.js" } }</script>
+<style>html,body{margin:0;height:100%;background:#111;color:#fff;font:14px system-ui}canvas{display:block;width:100%;height:100%}#info{position:fixed;left:8px;top:8px;background:#0008;padding:6px 10px;border-radius:6px}</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="info">caricamento…</div>
+<script type="module">
+import * as THREE from './vendor/three.module.min.js';
+import { makeKit } from './js/client/three3d.js';
+import { preload, charAssets } from './js/client/models.js';
+
+const q = new URLSearchParams(location.search);
+const chars = (q.get('chars') || 'knight,mage,skwarrior,hooded').split(',');
+const theme = q.get('theme') || 'giorno';
+const ground = q.get('ground') || 'erba';
+const models = (q.get('models') || 'medieval/tree_single_A,medieval/building_castle_red,medieval/building_tavern_blue,medieval/trees_A_large,medieval/building_tower_A_yellow,dungeon/torch_lit,dungeon/barrel_large').split(',').filter(Boolean);
+const anim = q.get('anim');
+const tilt = Number(q.get('tilt') ?? 0.62);
+const canvas = document.getElementById('c');
+const R = new THREE.WebGLRenderer({ canvas, antialias: true });
+R.outputColorSpace = THREE.SRGBColorSpace; R.toneMapping = THREE.ACESFilmicToneMapping; R.toneMappingExposure = 1.05;
+R.shadowMap.enabled = true; R.shadowMap.type = THREE.PCFSoftShadowMap;
+R.setPixelRatio(Math.min(2, devicePixelRatio));
+const resize = () => R.setSize(innerWidth, innerHeight, false);
+addEventListener('resize', resize); resize();
+
+await preload([...models, ...chars.flatMap(charAssets)]);
+const world = { w: 1000, h: 1000 };
+const K = makeKit({ world, cam: 'top', quality: 1, roster: chars.map((c, i) => ({ char: c, color: i })) });
+K.theme(theme);
+K.ground(ground, { tile: 180 });
+K.layer({ x0: 300, y0: 300, x1: 700, y1: 700, h: 0.6, transparent: true, once: true, draw: (d) => { d.ctx.fillStyle = '#8a7a66'; d.ctx.beginPath(); d.ctx.arc(500, 500, 190, 0, Math.PI * 2); d.ctx.fill(); } });
+const fl = K.mesh(new THREE.CircleGeometry(190, 48).rotateX(-Math.PI / 2), K.texMat('pietra', [5, 5]));
+K.place(fl, 500, 500, 1);
+models.forEach((m, i) => { const a = (i / models.length) * Math.PI * 2; const g = K.model(m, { size: m.startsWith('dungeon') ? 50 : 230 }); K.place(g, 500 + Math.cos(a) * 380, 500 + Math.sin(a) * 380); K.face(g, a + Math.PI); });
+K.scatter('medieval/tree_single_A', Array.from({ length: 40 }, (_, k) => ({ x: -300 + (k * 137) % 1600, y: -350 + ((k * 89) % 6) * 40, rot: k, s: 0.8 + (k % 5) * 0.1 })), { size: 70 });
+K.light(500, 500, 120, '#ffb35c', 1.6, { flicker: 0.6, dist: 500 });
+K.ambient(q.get('amb') || 'foglie');
+const avs = chars.map((c, i) => K.avatar(i));
+const cam = new THREE.PerspectiveCamera(38, 1, 5, 20000);
+const D = 1700;
+let t = 0, last = performance.now(), frames = 0, fpsT = 0;
+const info = document.getElementById('info');
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; t += dt;
+  K.t = t; K.dt = dt;
+  avs.forEach((av, i) => {
+    const a = (i / avs.length) * Math.PI * 2 + (anim ? 0 : t * 0.4);
+    const x = 500 + Math.cos(a) * 110, y = 500 + Math.sin(a) * 110;
+    av.set(x, y, { r: 38, look: anim ? a + Math.PI : a + Math.PI / 2, walk: anim ? 0 : 0.8, anim: anim || undefined });
+  });
+  for (const f of K.ticks) f(dt, t);
+  cam.aspect = innerWidth / innerHeight;
+  cam.position.set(500, Math.cos(tilt) * D, 500 + Math.sin(tilt) * D);
+  cam.lookAt(500, 0, 500); cam.updateProjectionMatrix();
+  K.sun.target.position.set(500, 0, 500); K.sun.target.updateMatrixWorld();
+  R.render(K.scene, cam);
+  frames++; fpsT += dt;
+  if (fpsT > 1) { info.textContent = `${theme} · ${chars.join(', ')} · ${Math.round(frames / fpsT)} fps · ${R.info.render.calls} draw calls`; frames = 0; fpsT = 0; }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+window.labReady = true;
+</script>
+</body>
+</html>

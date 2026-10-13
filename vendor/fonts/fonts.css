@@ -1,0 +1,30 @@
+/* Vendored Google Fonts (SIL OFL 1.1, see OFL-*.txt): the game must work offline on the LAN. Latin subset. */
+@font-face {
+  font-family: 'Cinzel Decorative';
+  font-style: normal;
+  font-weight: 700;
+  font-display: swap;
+  src: url(cinzel-decorative-700.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Cinzel Decorative';
+  font-style: normal;
+  font-weight: 900;
+  font-display: swap;
+  src: url(cinzel-decorative-900.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'MedievalSharp';
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url(medievalsharp.woff2) format('woff2');
+}
+@font-face {
+  font-family: 'Fredoka';
+  font-style: normal;
+  font-weight: 300 700;
+  font-stretch: 100%;
+  font-display: swap;
+  src: url(fredoka.woff2) format('woff2');
+}
